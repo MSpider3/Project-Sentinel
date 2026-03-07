@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Project Sentinel
+Comment=Biometric Facial Authentication System
+Exec=/usr/lib/project-sentinel/sentinel-val-app
+Icon=security-high-symbolic
+Terminal=false
+Type=Application
+Categories=System;Security;
+Keywords=Security;Authentication;Face;Biometrics;
+StartupNotify=true

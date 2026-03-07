@@ -170,6 +170,12 @@ info "Performing Full System Install..."
     systemctl enable sentinel-backend
     systemctl restart sentinel-backend
     
+    # Desktop Application Launcher
+    if [ -f "packaging/sentinel-ui.desktop" ]; then
+        cp packaging/sentinel-ui.desktop /usr/share/applications/
+        update-desktop-database /usr/share/applications/ || true
+    fi
+    
     # Client Script (for PAM)
     cp sentinel_client.py /usr/bin/sentinel_client.py
     chmod +x /usr/bin/sentinel_client.py
