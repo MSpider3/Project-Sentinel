@@ -11,6 +11,7 @@ from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label
+from rich.markup import escape as markup_escape
 
 from sentinel_tui.constants import (
     CONNECTION_PING_INTERVAL,
@@ -57,7 +58,7 @@ class ConnectionStatus(Widget):
     def compose(self) -> ComposeResult:
         yield Label("●", classes="conn-dot conn-dot--connecting", id="conn-dot")
         yield Label("Connecting...", classes="conn-label", id="conn-label")
-        yield Label("", classes="conn-socket", id="conn-socket")
+        yield Label("", classes="conn-socket", id="conn-socket", markup=False)
 
     def on_mount(self) -> None:
         self.set_interval(CONNECTION_PING_INTERVAL, self._ping)
@@ -65,6 +66,7 @@ class ConnectionStatus(Widget):
     def set_socket_path(self, path: str) -> None:
         self._socket_path = path
         try:
+            # We set markup=False on the Label in compose(), so this is now safe for any path!
             self.query_one("#conn-socket", Label).update(f"[{path}]")
         except Exception:
             pass

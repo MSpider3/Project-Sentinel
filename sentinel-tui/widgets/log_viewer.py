@@ -109,21 +109,10 @@ class LogViewer(Widget):
 
     def on_mount(self) -> None:
         """Start log polling interval."""
-        self._ensure_log_file()
         # Read the tail of the log initially
         self.call_after_refresh(self._initial_read)
         # Poll every 1.0s
         self.set_interval(1.0, self._poll_logs)
-
-    def _ensure_log_file(self) -> None:
-        """Create an empty log file if it doesn't exist yet so tailing doesn't crash."""
-        if not os.path.exists(self._log_file_path):
-            try:
-                os.makedirs(os.path.dirname(self._log_file_path), exist_ok=True)
-                with open(self._log_file_path, "a") as f:
-                    f.write("")
-            except Exception as e:
-                logger.warning(f"Could not create log file {self._log_file_path}: {e}")
 
     def _initial_read(self) -> None:
         """Read the last ~100 lines for immediate context."""

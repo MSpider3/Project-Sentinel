@@ -42,9 +42,31 @@ CONNECTION_PING_INTERVAL  = 5.0   # how often ConnectionStatus widget pings daem
 
 # ── Log Settings ──────────────────────────────────────────────────────────────
 LOG_VIEWER_MAX_LINES = 500   # max lines in LogViewer buffer (FIFO)
-# Dev log path — overridden by $SENTINEL_LOG_DIR env var
-LOG_DIR = os.environ.get("SENTINEL_LOG_DIR", "/var/log/sentinel")
-LOG_FILE = os.path.join(LOG_DIR, "sentinel.log")
+
+
+def _resolve_log_file() -> str:
+    """Determine log file path with write-access fallback."""
+    default_dir = os.environ.get("SENTINEL_LOG_DIR", "/var/log/sentinel")
+    candidates = [
+        default_dir,
+        os.path.join(os.path.expanduser("~"), ".cache", "sentinel"),
+        "/tmp",
+    ]
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            # Test writability
+            probe = os.path.join(d, ".probe_tui")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.unlink(probe)
+            return os.path.join(d, "sentinel.log")
+        except Exception:
+            continue
+    return "/tmp/sentinel.log"
+
+
+LOG_FILE = _resolve_log_file()
 
 
 # ── Error Codes ───────────────────────────────────────────────────────────────

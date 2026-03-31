@@ -44,9 +44,18 @@ info "Removing PAM client script..."
 rm -f /usr/bin/sentinel_client.py
 rm -f /usr/bin/sentinel-ui
 
+info "Removing global 'sentinel' command..."
+rm -f /usr/bin/sentinel
+
+info "Removing system-wide uv binary..."
+rm -f /usr/local/bin/uv
+
 info "Removing desktop shortcut..."
 rm -f /usr/share/applications/sentinel-ui.desktop
 update-desktop-database /usr/share/applications/ 2>/dev/null || true
+
+info "Removing log directory..."
+rm -rf /var/log/sentinel
 
 # 3. Handle data and config
 if [[ "$1" == "--purge" ]]; then

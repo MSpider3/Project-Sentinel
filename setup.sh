@@ -127,11 +127,46 @@ echo ""
 # 2. Setup TUI Environment
 echo ""
 info "Preparing TUI Interface..."
-if ! command -v uv &> /dev/null; then
-    run_cmd "Installing uv package manager..." curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.cargo/bin:$PATH"
+
+# Resolve uv: check system PATH first, then common install locations
+UV_BIN=""
+if command -v uv &> /dev/null; then
+    UV_BIN="$(command -v uv)"
+elif [ -f "$HOME/.local/bin/uv" ]; then
+    UV_BIN="$HOME/.local/bin/uv"
+elif [ -f "/root/.local/bin/uv" ]; then
+    UV_BIN="/root/.local/bin/uv"
 fi
-success "TUI Environment Ready."
+
+if [ -z "$UV_BIN" ]; then
+    info "Installing uv package manager..."
+    # Run directly — run_cmd can't handle shell pipes
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Source the env file the installer creates
+    if [ -f "$HOME/.local/bin/env" ]; then
+        source "$HOME/.local/bin/env"
+    fi
+    export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+    # Re-resolve after install
+    UV_BIN="$(command -v uv 2>/dev/null || echo '/root/.local/bin/uv')"
+fi
+
+if [ ! -x "$UV_BIN" ]; then
+    error_msg "uv not found after install attempt. Check your internet connection."
+    exit 1
+fi
+
+# Make uv available system-wide (setup runs as root, uv may be in /root/.local/bin)
+# Use realpath to handle Fedora's /usr/local/sbin -> /usr/local/bin symlink
+UV_SYSTEM="/usr/local/bin/uv"
+if [ "$(realpath "$UV_BIN" 2>/dev/null)" != "$(realpath "$UV_SYSTEM" 2>/dev/null)" ]; then
+    cp -f "$UV_BIN" "$UV_SYSTEM"
+    chmod 755 "$UV_SYSTEM"
+    success "Installed uv system-wide at $UV_SYSTEM."
+fi
+UV_BIN="$UV_SYSTEM"
+
+success "TUI Environment Ready (uv: $UV_BIN)."
 
 # 3. Full System Install
 echo ""
@@ -143,21 +178,18 @@ info "Performing Full System Install..."
     mkdir -p "$PROJECT_ETC"
     chmod 700 "$PROJECT_VAR"
     
-    # Configure global 'sentinel' command
-    cat << 'EOF' > /usr/bin/sentinel
-#!/bin/bash
-export SENTINEL_SOCKET_PATH=/run/sentinel/sentinel.sock
-cd /usr/lib/project-sentinel
-uv run sentinel-tui "$@"
-EOF
+    # Configure global 'sentinel' command (bake the absolute uv path at install time)
+    printf '#!/bin/bash\nexport SENTINEL_SOCKET_PATH=/run/sentinel/sentinel.sock\ncd /usr/lib/project-sentinel\n"%s" run sentinel-tui "$@"\n' "$UV_BIN" > /usr/bin/sentinel
     chmod +x /usr/bin/sentinel
-    success "Created global 'sentinel' command."
+    success "Created global 'sentinel' command (using uv at $UV_BIN)."
     
     # Copy Python Code and Packaging
     cp core/*.py "$PROJECT_LIB/" 2>/dev/null || true
-    cp -r sentinel-tui "$PROJECT_LIB/"
+    # IMPORTANT: copy as 'sentinel_tui' (underscore) — Python can't import 'sentinel-tui' (hyphen)
+    mkdir -p "$PROJECT_LIB/sentinel_tui"
+    cp -r sentinel-tui/. "$PROJECT_LIB/sentinel_tui/"
     cp pyproject.toml "$PROJECT_LIB/"
-    cp uv.lock "$PROJECT_LIB/"
+    cp uv.lock "$PROJECT_LIB/" 2>/dev/null || true
     cp Makefile "$PROJECT_LIB/"
     
     # Copy AI Models (daemon reads these from its CWD = /usr/lib/project-sentinel)
@@ -169,13 +201,13 @@ EOF
     # Python Venv and Dependencies via uv
     info "Installing Python dependencies natively using uv..."
     cd "$PROJECT_LIB"
-    uv sync
+    "$UV_BIN" sync
     cd "$CURRENT_DIR"
     success "Dependencies locked and loaded."
     
     # Config
     if [ ! -f "$PROJECT_ETC/config.ini" ]; then
-        cp backend/config.ini "$PROJECT_ETC/" 2>/dev/null || warn "Creating default config..."
+        cp config.ini "$PROJECT_ETC/" 2>/dev/null || warn "Creating default config..."
     fi
     
     # Service
@@ -192,7 +224,7 @@ EOF
     fi
     
     # Client Script (for PAM)
-    cp backend/sentinel_client.py /usr/bin/sentinel_client.py
+    cp core/sentinel_client.py /usr/bin/sentinel_client.py
     chmod +x /usr/bin/sentinel_client.py
     
     # Fix camera access: ensure the video group exists and allow V4L2 from systemd
@@ -213,7 +245,9 @@ EOF
     # This eliminates the AVC denial: init_t trying to add_name to lib_t dirs.
     if [ -d "$PROJECT_LIB/venv" ]; then
         info "Pre-compiling Python bytecode (prevents SELinux __pycache__ denial)..."
-        "$PROJECT_LIB/venv/bin/python3" -m compileall -q "$PROJECT_LIB/" 2>/dev/null || true
+        # Only precompile our own code — skip third-party test files (e.g. mediapipe has non-ASCII chars)
+        "$PROJECT_LIB/venv/bin/python3" -m compileall -q "$PROJECT_LIB/sentinel_tui/" 2>/dev/null || true
+        "$PROJECT_LIB/venv/bin/python3" -m compileall -q "$PROJECT_LIB/"*.py 2>/dev/null || true
         success "Python bytecode pre-compiled."
     fi
 

@@ -75,11 +75,11 @@ Screen {
 
 .nav-icon {
     width: 3;
-    color: inherit;
+    color: #94a3b8;
 }
 
 .nav-label {
-    color: inherit;
+    color: #94a3b8;
     text-style: bold;
 }
 
@@ -104,10 +104,6 @@ Screen {
     margin: 0 1 0 0;
     width: 1fr;
     height: 6;
-}
-
-.status-card:last-child {
-    margin-right: 0;
 }
 
 .card-title {
@@ -143,7 +139,7 @@ Screen {
     border: round #1e3a5f;
     height: 1fr;
     min-height: 12;
-    overflow-y: scroll;
+    overflow-y: auto;
     padding: 1;
 }
 
@@ -299,11 +295,6 @@ Footer {
 }
 
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
-ScrollableContainer > .scrollbar--vertical {
-    background: #111827;
-    color: #1e3a5f;
-}
-
 Scrollbar {
     background: #111827;
     color: #1e3a5f;
@@ -334,3 +325,15 @@ Scrollbar {
 .diag-name  { width: 30; color: #e2e8f0; }
 .diag-result { width: 1fr; color: #94a3b8; }
 .diag-action { width: auto; }
+
+/* ── Btn Row utility ─────────────────────────────────────────────────────── */
+.btn-row {
+    layout: horizontal;
+    height: 3;
+    margin-top: 2;
+    align: right middle;
+}
+
+.btn-row > Button {
+    margin-left: 1;
+}
