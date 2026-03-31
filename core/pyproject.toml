@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-sentinel"
+version = "2.3.0"
+description = "Face Authentication System for Linux"
+readme = "README.md"
+authors = [
+    { name = "Project Sentinel Contributors" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+dependencies = [
+    "opencv-python>=4.9.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.16.0",
+    "scipy>=1.11.0",
+    "mediapipe>=0.10.11",
+    "python-pam>=2.0.2"
+]
+
+[project.scripts]
+sentinel-daemon = "sentinel_service:main"
+
+[tool.setuptools]
+py-modules = [
+    "biometric_processor",
+    "camera_stream",
+    "sentinel_client",
+    "sentinel_logger",
+    "sentinel_service",
+    "spoof_detector",
+    "stability_tracker"
+]

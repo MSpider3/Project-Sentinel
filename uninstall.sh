@@ -42,6 +42,7 @@ rm -rf "$PROJECT_LIB"
 
 info "Removing PAM client script..."
 rm -f /usr/bin/sentinel_client.py
+rm -f /usr/bin/sentinel-ui
 
 info "Removing desktop shortcut..."
 rm -f /usr/share/applications/sentinel-ui.desktop

@@ -1,0 +1,336 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   app.tcss — Project Sentinel TUI Dark Cybersecurity Theme
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Global Reset & Base ──────────────────────────────────────────────────── */
+Screen {
+    background: #0a0e1a;
+    color: #e2e8f0;
+}
+
+/* ── App Layout — Sidebar + Content ─────────────────────────────────────── */
+#app-grid {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 22 1fr;
+    height: 1fr;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+#app-header {
+    height: 3;
+    background: #0f1729;
+    border-bottom: heavy #1e3a5f;
+    layout: horizontal;
+    align: left middle;
+    padding: 0 2;
+}
+
+#header-title {
+    color: #00d4ff;
+    text-style: bold;
+    width: 1fr;
+    content-align: left middle;
+}
+
+#header-subtitle {
+    color: #4b5563;
+    width: auto;
+    margin-right: 2;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────── */
+#sidebar {
+    background: #111827;
+    border-right: heavy #1e3a5f;
+    height: 1fr;
+    padding: 1 0;
+}
+
+#sidebar-title {
+    color: #4b5563;
+    text-style: bold;
+    padding: 0 2;
+    margin-bottom: 1;
+}
+
+.nav-item {
+    height: 3;
+    padding: 0 2;
+    color: #94a3b8;
+    layout: horizontal;
+    align: left middle;
+}
+
+.nav-item:hover {
+    background: #1e293b;
+    color: #e2e8f0;
+}
+
+.nav-item.--active {
+    background: #1e293b;
+    color: #00d4ff;
+    border-left: heavy #00d4ff;
+}
+
+.nav-icon {
+    width: 3;
+    color: inherit;
+}
+
+.nav-label {
+    color: inherit;
+    text-style: bold;
+}
+
+/* ── Main Content Area ────────────────────────────────────────────────────── */
+#content {
+    height: 1fr;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+/* ── Status Cards ─────────────────────────────────────────────────────────── */
+.status-cards {
+    layout: horizontal;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.status-card {
+    background: #111827;
+    border: round #1e3a5f;
+    padding: 1 2;
+    margin: 0 1 0 0;
+    width: 1fr;
+    height: 6;
+}
+
+.status-card:last-child {
+    margin-right: 0;
+}
+
+.card-title {
+    color: #4b5563;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+.card-value {
+    color: #e2e8f0;
+    text-style: bold;
+}
+
+.card-value--healthy  { color: #00ff88; }
+.card-value--degraded { color: #ffaa00; }
+.card-value--critical { color: #ff3366; }
+.card-value--loading  { color: #ffaa00; }
+.card-value--stopped  { color: #4b5563; }
+
+/* ── Section Headers ──────────────────────────────────────────────────────── */
+.section-header {
+    color: #00d4ff;
+    text-style: bold;
+    border-bottom: solid #1e3a5f;
+    padding-bottom: 1;
+    margin-bottom: 1;
+    margin-top: 1;
+}
+
+/* ── Log Viewer ───────────────────────────────────────────────────────────── */
+#log-viewer {
+    background: #080c15;
+    border: round #1e3a5f;
+    height: 1fr;
+    min-height: 12;
+    overflow-y: scroll;
+    padding: 1;
+}
+
+.log-line {
+    height: 1;
+    layout: horizontal;
+}
+
+.log-timestamp { color: #4b5563; width: 22; }
+.log-level     { width: 10; text-style: bold; }
+.log-component { color: #60a5fa; width: 14; }
+.log-message   { color: #cbd5e1; width: 1fr; }
+
+.log-level--INFO    { color: #60a5fa; }
+.log-level--WARNING { color: #ffaa00; }
+.log-level--ERROR   { color: #ff3366; }
+.log-level--DEBUG   { color: #4b5563; }
+.log-level--AUTH-OK { color: #00ff88; text-style: bold; }
+.log-level--AUTH-FAIL { color: #ff3366; text-style: bold; }
+.log-level--CRITICAL  { color: #ff3366; text-style: bold; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+Button {
+    background: #1e293b;
+    color: #e2e8f0;
+    border: round #1e3a5f;
+    height: 3;
+    min-width: 16;
+}
+
+Button:hover {
+    background: #2d3f5f;
+    border: round #00d4ff;
+    color: #00d4ff;
+}
+
+Button:focus {
+    border: round #00d4ff;
+}
+
+Button.-primary {
+    background: #0e4a6a;
+    color: #00d4ff;
+    border: round #00d4ff;
+    text-style: bold;
+}
+
+Button.-primary:hover {
+    background: #0a6694;
+}
+
+Button.-danger {
+    background: #4a0e1e;
+    color: #ff3366;
+    border: round #ff3366;
+}
+
+Button.-danger:hover {
+    background: #6a1a2e;
+}
+
+Button.-success {
+    background: #0e4a2a;
+    color: #00ff88;
+    border: round #00ff88;
+}
+
+/* ── Input Fields ─────────────────────────────────────────────────────────── */
+Input {
+    background: #111827;
+    border: round #1e3a5f;
+    color: #e2e8f0;
+    height: 3;
+}
+
+Input:focus {
+    border: round #00d4ff;
+}
+
+Input.-invalid {
+    border: round #ff3366;
+}
+
+/* ── Labels ───────────────────────────────────────────────────────────────── */
+Label {
+    color: #94a3b8;
+}
+
+.label--title {
+    color: #e2e8f0;
+    text-style: bold;
+}
+
+.label--muted {
+    color: #4b5563;
+}
+
+.label--success { color: #00ff88; text-style: bold; }
+.label--error   { color: #ff3366; text-style: bold; }
+.label--warning { color: #ffaa00; text-style: bold; }
+.label--info    { color: #60a5fa; }
+.label--cyan    { color: #00d4ff; text-style: bold; }
+.label--gold    { color: #ffd700; text-style: bold; }
+
+/* ── Error Banner ─────────────────────────────────────────────────────────── */
+#error-banner {
+    background: #2d0a14;
+    border: round #ff3366;
+    color: #ff3366;
+    height: auto;
+    padding: 1 2;
+    margin-bottom: 1;
+    display: none;
+}
+
+#error-banner.--visible {
+    display: block;
+}
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+Footer {
+    background: #0f1729;
+    border-top: heavy #1e3a5f;
+    color: #4b5563;
+}
+
+/* ── Progress Bar (Enrollment) ────────────────────────────────────────────── */
+.pose-progress {
+    height: 3;
+    layout: horizontal;
+    margin: 1 0;
+}
+
+.pose-step {
+    width: 1fr;
+    height: 3;
+    border: round #1e3a5f;
+    content-align: center middle;
+    color: #4b5563;
+}
+
+.pose-step--done {
+    border: round #00ff88;
+    color: #00ff88;
+    background: #0e4a2a;
+}
+
+.pose-step--active {
+    border: round #00d4ff;
+    color: #00d4ff;
+    background: #0e2a4a;
+    text-style: bold;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+ScrollableContainer > .scrollbar--vertical {
+    background: #111827;
+    color: #1e3a5f;
+}
+
+Scrollbar {
+    background: #111827;
+    color: #1e3a5f;
+}
+
+/* ── Auth Zone Badges ─────────────────────────────────────────────────────── */
+.zone-badge {
+    width: auto;
+    padding: 0 1;
+    text-style: bold;
+}
+
+.zone-badge--golden   { color: #ffd700; border: round #ffd700; }
+.zone-badge--standard { color: #00ff88; border: round #00ff88; }
+.zone-badge--2fa      { color: #ffaa00; border: round #ffaa00; }
+.zone-badge--failure  { color: #ff3366; border: round #ff3366; }
+
+/* ── Diagnostic Test Row ─────────────────────────────────────────────────── */
+.diag-row {
+    height: 3;
+    layout: horizontal;
+    border-bottom: solid #1e293b;
+    align: left middle;
+    padding: 0 1;
+}
+
+.diag-icon  { width: 4; }
+.diag-name  { width: 30; color: #e2e8f0; }
+.diag-result { width: 1fr; color: #94a3b8; }
+.diag-action { width: auto; }

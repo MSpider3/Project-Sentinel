@@ -27,6 +27,10 @@ namespace Sentinel {
 
         public AuthView (BackendService backend) {
             GLib.Object (orientation: Gtk.Orientation.VERTICAL, spacing: 0);
+            this.vexpand = true;
+            this.hexpand = true;
+            this.valign = Gtk.Align.FILL;
+            this.halign = Gtk.Align.FILL;
 
             this.backend = backend;
 
@@ -56,12 +60,18 @@ namespace Sentinel {
         private void setup_ui () {
             // Modern UI: Use Overlay as the main container
             overlay = new Gtk.Overlay ();
+            overlay.vexpand = true;
+            overlay.hexpand = true;
+            overlay.valign = Gtk.Align.FILL;
+            overlay.halign = Gtk.Align.FILL;
+            overlay.set_size_request(640, 480);
             append (overlay);
 
             // 1. Camera Preview (Background)
             camera_preview = new CameraPreview ();
             camera_preview.vexpand = true;
             camera_preview.hexpand = true;
+            camera_preview.visible = true;
             overlay.set_child (camera_preview);
 
             // 2. HUD Overlay (Status & Prompts) - Top Center
@@ -196,8 +206,8 @@ namespace Sentinel {
             while (is_running) {
                 yield process_frame ();
 
-                // Small delay to allow UI events to process (10ms)
-                yield nap (10);
+                // Poll at ~15 FPS to respect daemon RPM rate limits
+                yield nap (66);
             }
         }
 
@@ -330,6 +340,7 @@ namespace Sentinel {
             status_label.label = "Authentication stopped";
             prompt_label.label = "";
             camera_preview.clear_face_box ();
+            camera_preview.clear_frame ();
             camera_preview.set_confidence (0.0);
         }
     }

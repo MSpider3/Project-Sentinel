@@ -4,7 +4,7 @@
 
 **A secure, daemon-based face recognition system designed to bring "Windows Hello"-like biometric unlock to Linux desktops.**
 
-Built for **Fedora 43 / Wayland** | Powered by **ONNX Runtime** & **MediaPipe** | Privacy-First — **100% Local Processing**
+Built for **Fedora / Wayland** | Powered by **ONNX Runtime** & **MediaPipe** | Privacy-First — **100% Local Processing**
 
 </div>
 
@@ -19,20 +19,25 @@ Built for **Fedora 43 / Wayland** | Powered by **ONNX Runtime** & **MediaPipe** 
 
 ---
 
+> [!NOTE]
+> **TUI Client Ready**
+>
+> Project Sentinel now includes a highly responsive, standalone **Terminal User Interface (TUI)** built with Python and Textual to control the background biometric daemon. You can enroll faces, manage settings, view live HD camera previews, and monitor intrusion logs directly from your terminal!
+
+---
+
 ## 📖 Table of Contents
 
 - [Overview](#-overview)
 - [Key Features](#-key-features)
 - [System Architecture](#%EF%B8%8F-system-architecture)
 - [How It Works](#-how-it-works)
-- [Prototype for Testing](#-prototype-for-testing)
-- [Installation](#%EF%B8%8F-installation)
+- [Installation & Setup](#%EF%B8%8F-installation--setup)
+- [Using the Sentinel TUI](#-using-the-sentinel-tui)
 - [Face Enrollment](#-face-enrollment)
-- [GTK App (WIP)](#-gtk-app-installation-wip)
 - [Configuration](#-configuration)
 - [Project Structure](#-project-structure)
 - [Contributing](#-contributing)
-- [License](#-license)
 
 ---
 
@@ -54,10 +59,10 @@ Unlike cloud-based solutions, **all processing happens entirely on your machine*
 | 🎯 **Interactive Challenges** | Random head-turn challenges + mandatory blink test for robust liveness verification |
 | 🧠 **Adaptive Embeddings** | System learns your face over time (lighting, glasses, aging) via a FIFO adaptive gallery |
 | 🚨 **Intrusion Detection (IDS)** | Detects and logs unrecognized faces with screenshots; blacklists repeat offenders |
-| 📷 **IR Camera Support** | Auto-detection for infrared cameras (future-ready) |
+| 📊 **Audit Logging** | Detailed daily log files with 30-day FIFO retention |
 | 🔧 **PAM Integration** | Native `pam_exec` integration with GDM for seamless login/unlock |
 | 🖥️ **Kalman Tracking** | Target locking with Kalman filter for stable face tracking across frames |
-| 📊 **Audit Logging** | Detailed daily log files with 30-day FIFO retention |
+| 💻 **Textual TUI Client** | Beautiful dashboard for hardware mapping and real-time live testing |
 
 ### Multi-Tier Confidence System
 
@@ -81,7 +86,7 @@ graph TB
     subgraph User Layer
         GDM["🖥️ GDM Login Screen"]
         LockScreen["🔒 Lock Screen"]
-        GTKApp["🛠️ Sentinel GTK4 App<br/><i>(WIP - Vala)</i>"]
+        TUIApp["💻 Sentinel TUI<br/><i>(Textual / Python)</i>"]
     end
 
     subgraph IPC Layer
@@ -103,98 +108,21 @@ graph TB
         BD["BlinkDetector<br/>EAR Algorithm"]
         FES["FaceEmbeddingStore<br/>Gallery Manager"]
         BLM["BlacklistManager<br/>Intrusion Detection"]
-        AM["AdaptiveManager<br/>Embedding Learner"]
-        KST["KalmanStabilityTracker<br/>Face Tracking"]
     end
 
-    subgraph AI Models ["ONNX AI Models"]
-        YuNet["YuNet<br/>Face Detection"]
-        SFace["SFace<br/>Face Recognition<br/>(128-d Embeddings)"]
-        MiniFAS["MiniFASNetV2<br/>Anti-Spoofing"]
-        MP["MediaPipe<br/>Face Mesh (468 pts)"]
-    end
-
-    subgraph Storage
-        Gallery["📁 Face Galleries<br/><code>gallery_*.npy</code>"]
-        Blacklist["🚫 Blacklist DB<br/><code>models/blacklist/</code>"]
-        Config["⚙️ config.ini"]
-        Logs["📝 Audit Logs<br/><code>logs/</code>"]
-    end
-
+    TUIApp -->|"JSON-RPC"| UnixSocket
     GDM -->|"pam_exec"| PAMClient
-    LockScreen -->|"pam_exec"| PAMClient
-    GTKApp -->|"JSON-RPC"| UnixSocket
     PAMClient -->|"JSON-RPC"| UnixSocket
     UnixSocket --> JSONRPC --> RPC --> SentinelService
 
     SentinelService --> SA
     SA --> BP
-    SA --> LV
     SA --> FES
-    SA --> BLM
-    SA --> AM
-    LV --> BD
     BP --> SD
-    BP --> KST
 
-    BP --> YuNet
-    BP --> SFace
-    SD --> MiniFAS
-    BD --> MP
-
-    FES --> Gallery
-    BLM --> Blacklist
-    SA --> Logs
-    SentinelService --> Config
-
-    style GTKApp fill:#ff9800,stroke:#e65100,color:#000
+    style TUIApp fill:#00d4ff,stroke:#1e3a5f,color:#000
     style UnixSocket fill:#2196f3,stroke:#0d47a1,color:#fff
     style SA fill:#4caf50,stroke:#1b5e20,color:#fff
-    style MiniFAS fill:#e91e63,stroke:#880e4f,color:#fff
-```
-
-### Data Flow — Authentication Sequence
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant GDM as GDM / Lock Screen
-    participant PAM as PAM Client
-    participant Daemon as Sentinel Daemon
-    participant Auth as SentinelAuthenticator
-    participant Camera as Camera
-
-    User->>GDM: Presses key to wake
-    GDM->>PAM: Triggers pam_exec
-    PAM->>Daemon: authenticate_pam (JSON-RPC)
-    Daemon->>Camera: Open camera stream
-    
-    loop For up to 5 seconds
-        Camera->>Auth: Capture frame
-        Auth->>Auth: Detect face (YuNet)
-        Auth->>Auth: Validate quality & stability (Kalman)
-        Auth->>Auth: Check spoof (MiniFASNet)
-        Auth->>Auth: Generate embedding (SFace)
-        Auth->>Auth: Match against gallery (cosine distance)
-        
-        alt Golden Match (≤ 0.25)
-            Auth->>Auth: Issue head-turn challenge
-            Auth->>Auth: Verify blink (MediaPipe EAR)
-            Auth-->>Daemon: SUCCESS
-        else Standard Match (≤ 0.42)
-            Auth-->>Daemon: SUCCESS
-        else 2FA Match (≤ 0.50)
-            Auth-->>Daemon: REQUIRE_2FA
-        else No Match
-            Auth->>Auth: Log intrusion + screenshot
-            Auth-->>Daemon: FAILURE
-        end
-    end
-
-    Daemon->>Camera: Release camera
-    Daemon-->>PAM: Result (SUCCESS / FAILURE / 2FA)
-    PAM-->>GDM: Exit code (0=success, 1=fail, 2=2FA)
-    GDM-->>User: Unlock / Show password prompt
 ```
 
 ---
@@ -202,80 +130,32 @@ sequenceDiagram
 ## 🧪 How It Works
 
 ### 1. Face Detection — YuNet
-The system uses **OpenCV's DNN-based YuNet** model to detect faces in real time. It returns bounding boxes, confidence scores, and facial landmarks, which are filtered by a minimum face size and score threshold.
+The system uses **OpenCV's DNN-based YuNet** model to detect faces in real time. It returns bounding boxes and confidence scores.
 
 ### 2. Anti-Spoofing — MiniFASNet
-Before any recognition attempt, every detected face is run through the **MiniFASNet** anti-spoofing model. This ONNX model classifies whether the face is a live person or a printed photo / screen replay. On first run, the system auto-calibrates by testing 6 preprocessing configurations to find the optimal one for your camera.
+Before recognition attempts, every detected face is run through the **MiniFASNet** anti-spoofing model to classify whether the face is a live person or a printed photo / screen replay.
 
 ### 3. Face Recognition — SFace
-Faces that pass the spoof check are fed into the **SFace** model (via ONNX Runtime) to generate a compact **128-dimensional embedding vector**. This embedding is then compared against the enrolled user's gallery using **cosine distance**, with the multi-tier threshold system determining access level.
+Faces that pass the spoof check are fed into **SFace** to generate a **128-dimensional embedding vector**. This embedding is compared against the enrolled gallery using **cosine distance**.
 
-### 4. Liveness Verification — MediaPipe + EAR
-For highest-confidence matches, the system issues an **interactive liveness challenge**:
-- **Step 1:** A random head-turn direction (left, right, up, or down) is challenged.
-- **Step 2:** A **blink test** is performed using the **Eye Aspect Ratio (EAR)** algorithm computed from MediaPipe's 468-point face mesh landmarks.
-
-### 5. Target Locking — Kalman Filter
-The `KalmanStabilityTracker` uses a Kalman filter to maintain persistent tracking of the primary face across frames, preventing identity switches when multiple faces enter the frame.
-
-### 6. Adaptive Learning
-On Golden-zone matches, the system can optionally **adapt** its embedding gallery by appending the new embedding to a FIFO queue (with daily limits). This allows the system to naturally adjust to changes in appearance like lighting, facial hair, or glasses.
-
-### 7. Intrusion Detection System (IDS)
-When an unrecognized face fails authentication, the `BlacklistManager` saves a screenshot and the failed embedding to the blacklist directory. Repeat offenders are actively blocked even before recognition runs. Users can review intrusions via the GTK app (or prototype) and confirm or dismiss them.
+### 4. Liveness Verification — MediaPipe
+For low-confidence checks, **MediaPipe** maps 468 facial anchor points to perform Blink Detection via the **Eye Aspect Ratio (EAR)** algorithm.
 
 ---
 
-## 🧪 Prototype for Testing
+## 🛠️ Installation & Setup
+We provide a unified system script to handle dependencies, ONNX model downloads, and basic installation bounds.
 
-> [!TIP]
-> There is a **`prototype_for_testing/`** folder in the repository that contains standalone scripts representing the **project's prototype**. You can use these scripts to test the core functionality of the biometric engine without needing the daemon or GTK app.
-
-### Prototype Files
-
-| File | Description |
-|---|---|
-| `enroll.py` | Standalone face enrollment script with Tkinter GUI. Captures multiple poses and saves face embeddings. |
-| `authenticate.py` | Standalone authentication script. Runs the full pipeline: face detection → spoof check → recognition → liveness challenge. |
-| `sentinel-greeter.py` | A GTK4-based greeter prototype for integration with `greetd` (Wayland-native login screen). |
-| `biometric_processor.py` | Copy of the core engine for standalone operation. |
-| `spoof_detector.py` | Copy of the anti-spoofing module. |
-| `camera_stream.py` | Threaded camera stream for efficient frame capture. |
-| `stability_tracker.py` | Kalman filter-based face stability tracker. |
-| `config.ini` | Configuration file for prototype operation. |
-
-### Running the Prototype
-
-```bash
-# 1. Navigate to the prototype directory
-cd prototype_for_testing/
-
-# 2. Create a virtual environment and install dependencies
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# 3. Enroll your face (creates face embeddings)
-python3 enroll.py
-
-# 4. Test authentication
-python3 authenticate.py
-```
-
-The enrollment script will open your camera, guide you through multiple face poses (center, left, right, up, down), and save your 128-d embedding gallery as a `.npy` file.
-
----
-
-## 🛠️ Installation
-We provide a unified setup script to handle dependencies, **model downloading**, compilation, and installation.
 ### Prerequisites
 
 - **OS:** Fedora 40+ (Recommended) — designed for Wayland/GNOME
-- **Hardware:** Webcam (IR camera supported for future versions)
-- **Python:** 3.10+
-- **System Packages:** `gcc`, `python3-devel`, `pam-devel`
+- **Hardware:** Supported V4L2 Webcam
+- **Tooling:** Python 3.10+, `uv` installed.
 
-### Quick Start (Full System)
+### Start the Biometric Engine (Daemon)
+
+Before you can interact with the system or login/enroll, the Python background daemon needs context.
+You can run it in your developer mode environment:
 
 ```bash
 # 1. Clone the repository
@@ -285,245 +165,94 @@ cd Project-Sentinel
 # 2. Run the Setup Wizard (must be root)
 chmod +x setup.sh
 sudo ./setup.sh
+
+# 3. Run the Daemon globally
+sudo ./venv/bin/python3 core/sentinel_service.py
 ```
 
-### Setup Wizard Options
+> **Note**: For production, standard users should enable the provided `sentinel-backend.service` systemD unit instead of running the python script manually.
 
-The setup script (`setup.sh`) provides two installation modes:
+---
 
-| Mode | Description |
-|---|---|
-| **[1] Full System Install** | Installs to `/usr/lib/project-sentinel/`, enables `systemd` service, config at `/etc/project-sentinel/config.ini` |
-| **[2] Dev Install** | Sets up local `venv`, compiles locally in `./builddir/` for testing |
+## 💻 Using the Sentinel TUI
 
-> **Note:** The setup script will automatically download the required AI models (~40MB total) if they are missing.
+The Sentinel Control Interface allows you to securely manipulate the root-locked daemon via standard JSON-RPC without requiring `sudo` on every single command.
 
-### What the Setup Script Does
-
-1. **Installs system dependencies** via `dnf` (vala, gtk4-devel, json-glib-devel, gstreamer1-devel, etc.)
-2. **Downloads AI Models** (checks `models/` directory, fetches if missing)
-3. **Compiles the Vala GTK4 app** using Meson + Ninja
-3. **Sets up Python virtual environment** and installs pip dependencies
-4. **Copies files** to system directories (Full Install mode)
-5. **Enables the systemd daemon** (`sentinel-backend.service`)
-6. **Installs the PAM client** to `/usr/bin/sentinel_client.py`
-
-### Enabling Face Unlock (PAM) — Manual Step
-
-After installation, you **must manually** configure PAM to enable biometric login:
+If you don't use `uv`, please install it first (`pip install uv`).
 
 ```bash
-# Edit the GDM PAM configuration
-sudo nano /etc/pam.d/gdm-password
+# 1. Install dependencies and text/UI boundaries (only needed once)
+make install-dev
+
+# 2. Run the main TUI Dashboard
+make run
 ```
 
-Add this line to the **very top** of the `auth` section:
-
-```text
-auth sufficient pam_exec.so expose_authtok quiet /usr/bin/sentinel_client.py
-```
-
-> [!CAUTION]
-> **Be careful when editing PAM files!** A misconfiguration can lock you out of your system. Always keep a root terminal session open as a backup before making changes.
-
-### Dependencies (Python)
-
-Key Python packages used (installed via `requirements.txt`):
-
-| Package | Purpose |
-|---|---|
-| `opencv-contrib-python` | Computer vision, YuNet face detection |
-| `onnxruntime` | ONNX model inference (SFace, MiniFASNet) |
-| `mediapipe` | Face mesh landmarks (468 points) for blink detection |
-| `numpy` | Embedding operations and math |
-| `scipy` | Eye Aspect Ratio computation |
-| `openvino` | Optional hardware acceleration |
+### TUI Features
+- **Global Command**: Launch instantly from anywhere using `sentinel`.
+- **Dashboard**: Track daemon uptime, configuration versions, active cameras, and ONNX states.
+- **Log Viewer**: Live streaming logs, color-coded levels, and component sorting.
+- **Device Manager**: Directly parse `v4l2` cameras and switch `/dev/video*` streams instantly.
+- **Settings Manager**: Automatically pulls backend thresholds, performs field-validations (e.g. integer checks), and hot-reloads the state into the config file.
 
 ---
 
 ## 👤 Face Enrollment
 
-### Via Prototype Script (Available Now)
+Enrolling a new biometric gallery uses the Textual TUI wizard.
 
-```bash
-cd prototype_for_testing/
-source venv/bin/activate
-python3 enroll.py
-```
+1. Launch the TUI using `make run`.
+2. Tap the `[5] Enroll Face` action from the left-side navigation rail.
+3. Enter your short **Username**. 
+4. Click **Start Camera**.
+5. The `sentinel-backend.service` will begin processing frames and evaluating them through the engine. The TUI will stream live warnings like `"Face too small"` or `"Multiple faces detected"`.
+6. Look in the requested directions (Center, Left, Right, Up, Down) to capture a rich 3D vector.
 
-1. A Tkinter dialog will ask for your **username** and whether you wear glasses.
-2. The camera opens and guides you through **5 poses**: Center → Left → Right → Up → Down.
-3. For each pose, it captures **4 embedding samples** for robustness.
-4. The gallery is saved as `models/gallery_<username>.npy` (a NumPy array of 128-d vectors).
-
-### Via GTK App (WIP)
-
-> [!NOTE]
-> The Vala/GTK4 enrollment UI is under development. The `src/EnrollView.vala` provides a modern GNOME-native enrollment experience with real-time camera preview and GStreamer-based rendering. Once the app build is stable, it will communicate with the daemon via JSON-RPC over Unix socket for enrollment operations.
-
----
-
-## 🖥️ GTK App Installation (WIP)
-
-> [!WARNING]
-> **The GTK app is currently a work in progress.** I am learning **Vala** to build a proper GNOME-native application. If you have experience with Vala, GTK4, Meson, or GNOME app development, **your help would be greatly appreciated!**
-
-The GTK4 application lives in the `src/` directory and includes:
-
-| File | Purpose |
-|---|---|
-| `Application.vala` | GTK4 Application entry point |
-| `MainWindow.vala` | Main window with tabbed navigation |
-| `AuthView.vala` | Real-time authentication display with face overlay |
-| `EnrollView.vala` | Face enrollment flow with multi-pose capture |
-| `SettingsView.vala` | Configuration UI for thresholds and camera settings |
-| `IntrusionReviewDialog.vala` | Review and manage detected intrusions |
-| `BackendService.vala` | JSON-RPC IPC client connecting to the daemon |
-| `CameraPreview.vala` | GStreamer-based camera preview widget |
-| `style.css` | Custom GTK4 stylesheet |
-
-### Building the Vala App (for developers)
-
-```bash
-# Install build dependencies
-sudo dnf install vala gtk4-devel json-glib-devel gstreamer1-devel \
-                 gstreamer1-plugins-base-devel meson ninja-build
-
-# Configure and compile
-meson setup builddir --prefix=/usr
-ninja -C builddir
-
-# Run the compiled app
-./builddir/src/sentinel-ui
-```
-
-> [!IMPORTANT]
-> The daemon (`sentinel_service.py`) **must be running** before launching the GTK app:
-> ```bash
-> sudo ./venv/bin/python3 sentinel_service.py
-> ```
-> For local testing without root permissions, you can use a temporary socket:
-> ```bash
-> export SENTINEL_SOCKET_PATH=/tmp/sentinel.sock
-> ./venv/bin/python3 sentinel_service.py &
-> ./builddir/sentinel-ui
-> ```
+### Real-Time Pipeline Testing
+Want to test exactly what the PAM module will see when you try to unlock your laptop?
+Open the **Authentication Test** screen in the TUI, select your namespace, and hit `Start`. You will see the physical Cosine Distance numbers mapping live!
 
 ---
 
 ## ⚙️ Configuration
 
-All settings are externalized in **`config.ini`** (located at `/etc/project-sentinel/config.ini` for system installs, or locally in the project root for dev installs).
+All settings are externalized via `config.ini` in the project root. While you *can* edit this manually, pulling up the **TUI Settings Editor** is heavily recommended, as it will automatically validate thresholds like integers out-of-bounds.
 
-### Camera Settings
-```ini
-[Camera]
-device_id = 0      # Camera index (0 = built-in, 1 = external USB)
-width = 640         # Capture resolution
-height = 480
-fps = 15            # Frames per second (lower = more battery efficient)
-```
-
-### Security Thresholds
-```ini
-[Security]
-golden_threshold = 0.25       # Tier 1 — Instant access (strictest)
-standard_threshold = 0.42     # Tier 2 — Normal access
-two_factor_threshold = 0.50   # Tier 3 — Requires password
-recognition_threshold = 0.38  # General fallback threshold
-max_retries = 3               # Max failed attempts before lockout
-global_session_timeout = 25.0 # Max seconds for entire auth session
-```
-
-### Liveness Detection
-```ini
-[Liveness]
-ear_open_threshold = 0.24     # Eye Aspect Ratio for "open"
-ear_closed_threshold = 0.19   # EAR for "closed" (blink count)
-challenge_timeout = 20.0      # Seconds to complete a challenge
-spoof_threshold = 0.92        # Anti-spoofing strictness (0.0 - 1.0)
-```
-
-### Adaptive Learning
-```ini
-[AdaptivePolicy]
-adaptation_limit_per_day = 1                 # Daily learning limit
-initial_adaptations_require_password = 3     # First N adaptations need password
-```
+**Examples of what you can control:**
+- `fps = 15`: Drops webcam frame evaluations down to save serious laptop battery.
+- `two_factor_threshold = 0.50`: How strict the algorithm is before requesting a password alongside face unlock.
+- `spoof_threshold = 0.92`: How aggressively MiniFASNet blocks picture attacks.
 
 ---
 
 ## 📂 Project Structure
 
 ```
-Face_Regcognition_Project/
-├── sentinel_service.py        # 🔧 Main daemon — JSON-RPC Unix socket server
-├── biometric_processor.py     # 🧠 Core engine — all AI processing classes
-├── spoof_detector.py          # 🛡️ MiniFASNet anti-spoofing module
-├── camera_stream.py           # 📷 Threaded camera capture
-├── stability_tracker.py       # 🎯 Kalman filter face tracker
-├── sentinel_client.py         # 🔑 PAM client for GDM integration
-├── config.ini                 # ⚙️ Configuration file
-├── setup.sh                   # 📦 Unified setup wizard
-├── requirements.txt           # 📋 Python dependencies
-├── meson.build                # 🏗️ Meson build system config
-│
-├── src/                       # 🖥️ Vala GTK4 Application (WIP)
-│   ├── Application.vala
-│   ├── MainWindow.vala
-│   ├── AuthView.vala
-│   ├── EnrollView.vala
-│   ├── SettingsView.vala
-│   ├── IntrusionReviewDialog.vala
-│   ├── BackendService.vala
-│   ├── CameraPreview.vala
-│   └── style.css
-│
-├── prototype_for_testing/     # 🧪 Standalone prototype scripts
-│   ├── enroll.py              #    Face enrollment (Tkinter GUI)
-│   ├── authenticate.py        #    Authentication test
-│   ├── sentinel-greeter.py    #    greetd greeter prototype
-│   └── ...                    #    (copies of core engine modules)
-│
-├── models/                    # 🤖 AI Models & Embeddings
-│   ├── download_models.sh     #    ⬇️ Script to download all AI models
-│   ├── face_detection_yunet_2023mar.onnx
-│   ├── face_recognition_sface_2021dec.onnx
-│   ├── MiniFASNetV2.onnx
-│   ├── MiniFASNetV1SE.onnx
-│   ├── gallery_*.npy          #    Enrolled face embeddings
-│   └── blacklist/             #    Intrusion detection data
-│
-├── packaging/                 # 📦 System integration files
-│   ├── sentinel-backend.service   # systemd service unit
-│   ├── sentinel-gui.desktop       # .desktop launcher
-│   ├── com.sentinel.policy        # Polkit policy
-│   └── sentinel-biometric.spec    # RPM spec file
-│
-├── tools/                     # 🔨 Developer utilities
-│   ├── convert_models.py      #    PyTorch → ONNX converter
-│   ├── onnx_healthcheck.py    #    Model validation
-│   ├── test_rpc.py            #    RPC testing utility
-│   └── FasNetBackbone.py      #    MiniFASNet architecture
-│
-└── logs/                      # 📝 Audit logs (daily rotation)
+├── core/
+│   ├── sentinel_service.py        # 🔧 JSON-RPC Daemon Server
+│   ├── biometric_processor.py     # 🧠 Core engine
+│   ├── sentinel_logger.py         # 📝 Structured Log Exporter
+│   └── sentinel_client.py         # 🔑 PAM connector 
+├── sentinel-tui/                  # 💻 TUI (Textual) Python interface
+│   ├── app.py                     # Entry layout
+│   ├── screens/                   # Subsystems (enrollment, settings, diagnostic)
+│   ├── scripts/                   # OpenCV Sub-process detached viewer
+│   └── services/                  # JSON-RPC integration layer
+├── config.ini                     # ⚙️ Universal configuration bounds
+├── setup.sh                       # 📦 System dependency wizard
+├── Makefile                       # 📋 TUI automation
+├── pyproject.toml                 # uv manifest
+└── models/                        # 🤖 ONNX Models (YuNet, SFace, MiniFASNet)
 ```
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Here are some areas where help is especially needed:
+We are focusing primarily on optimizing the Python Biometric Engine speeds and expanding the TUI integration patterns.
 
-### 🔥 High Priority — Vala/GTK4 App
-The GTK4 application is the biggest area where contributions are needed. I am currently **learning Vala** to build this, so if you are experienced with:
-- **Vala** programming language
-- **GTK4 / libadwaita** UI development
-- **Meson** build system
-- **GStreamer** integration
-- **JSON-RPC** IPC patterns
-
-...your help would be incredibly valuable!
+- Submit a Pull Request targeting `/sentinel-tui/` if you add any cool Textual Dashboard widgets.
+- File issues if SELinux blocks your V4L2 `/dev/video*` mappings.
 
 ### Other Contribution Areas
 - **Testing** on different Linux distributions

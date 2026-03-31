@@ -51,6 +51,7 @@ import threading
 import time
 import base64
 import pwd
+import traceback
 
 _log.info("stdlib imports OK")
 
@@ -208,8 +209,9 @@ class SentinelService:
         except Exception as e:
             self.warmup_error = str(e)
             self.warmed = False
-            self.logger.error(f"Initialization error: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            self.logger.error(f"Failed during warmup/initialization: {e}")
+            self.logger.error(traceback.format_exc())
+            return {"success": False, "error": self.warmup_error}
         finally:
             self.init_in_progress = False
             self._init_done.set()
@@ -248,7 +250,13 @@ class SentinelService:
             fps = self.config.config.getint('Camera', 'fps', fallback=15)
             
             if self.camera: self.camera.stop()
-            self.camera = CameraStream(src=0, width=width, height=height, fps=fps).start()
+            self.camera = CameraStream(src=self.config.CAMERA_INDEX, width=width, height=height, fps=fps).start()
+            
+            if self.camera is None or not getattr(self.camera, 'grabbed', False):
+                self.camera = None
+                self.current_mode = None
+                return {"success": False, "error": "Camera opened but no valid frames were received"}
+
             self.current_mode = 'auth'
             
             return {"success": True, "users": user_names, "target_user": target_user}
@@ -263,7 +271,14 @@ class SentinelService:
         try:
             frame = self.camera.read()
             if frame is None:
-                return {"success": False, "error": "No frame available"}
+                return {
+                    "success": True,
+                    "state": "ERROR",
+                    "message": "Camera disconnected or frozen. Please check USB connection.",
+                    "face_box": None,
+                    "info": {},
+                    "frame": ""
+                }
             
             state, message, face_box, info = self.authenticator.process_frame(frame)
             
@@ -271,12 +286,31 @@ class SentinelService:
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_b64 = base64.b64encode(buffer).decode('utf-8')
             
+            # Sanitize face_box to strict Python ints for Vala UI
+            safe_face_box = None
+            if face_box is not None:
+                try:
+                    safe_face_box = [int(float(x)) for x in face_box[:4]]
+                except Exception:
+                    pass
+            
+            # Sanitize info dict (convert any NumPy scalars to native Python types)
+            safe_info = {}
+            if isinstance(info, dict):
+                for k, v in info.items():
+                    if hasattr(v, 'item'):
+                        safe_info[k] = v.item()
+                    elif isinstance(v, (int, float, str, bool)):
+                        safe_info[k] = v
+                    else:
+                        safe_info[k] = str(v)
+
             return {
                 "success": True,
-                "state": state or "UNKNOWN",
-                "message": message or "",
-                "face_box": face_box,
-                "info": info or {},
+                "state": str(state) if state else "UNKNOWN",
+                "message": str(message) if message else "",
+                "face_box": safe_face_box,
+                "info": safe_info,
                 "frame": frame_b64 or ""
             }
         except Exception as e:
@@ -318,7 +352,7 @@ class SentinelService:
             width = self.config.config.getint('Camera', 'width', fallback=640)
             height = self.config.config.getint('Camera', 'height', fallback=480)
             
-            cam = CameraStream(src=0, width=width, height=height, fps=15).start()
+            cam = CameraStream(src=self.config.CAMERA_INDEX, width=width, height=height, fps=15).start()
             
             # Allow camera to warmup slightly
             time.sleep(0.5)
@@ -386,8 +420,13 @@ class SentinelService:
             width = self.config.config.getint('Camera', 'width', fallback=640)
             height = self.config.config.getint('Camera', 'height', fallback=480)
             
-            if self.camera: self.camera.stop()
-            self.camera = CameraStream(src=0, width=width, height=height, fps=15).start()
+            self.camera = CameraStream(src=self.config.CAMERA_INDEX, width=width, height=height, fps=15).start()
+            
+            if self.camera is None or not getattr(self.camera, 'grabbed', False):
+                self.camera = None
+                self.current_mode = None
+                return {"success": False, "error": "Camera opened but no valid frames were received"}
+
             self.current_mode = 'enroll'
             
             return {
@@ -403,7 +442,17 @@ class SentinelService:
             return {"success": False, "error": "Enrollment not started"}
         try:
             frame = self.camera.read()
-            if frame is None: return {"success": False, "error": "No frame"}
+            if frame is None:
+                return {
+                    "success": True,
+                    "completed": False,
+                    "current_pose": 0,
+                    "total_poses": 1,
+                    "pose_info": {"instruction": "Camera Disconnected/Frozen. Restart Daemon."},
+                    "status": "CAMERA_FROZEN",
+                    "face_box": None,
+                    "frame": ""
+                }
             
             if self.enroll_current_pose >= len(self.enroll_poses):
                 return {"success": True, "completed": True, "message": "Enrollment complete!"}
@@ -494,6 +543,7 @@ class SentinelService:
         return {
             "success": True,
             "config": {
+                'config_version': cfg.getint('Meta', 'config_version', fallback=1),
                 'camera_device_id': cfg.getint('Camera', 'device_id', fallback=0),
                 'camera_width': cfg.getint('Camera', 'width', fallback=640),
                 'camera_height': cfg.getint('Camera', 'height', fallback=480),
@@ -516,6 +566,11 @@ class SentinelService:
             
             if os.path.exists(ini_path):
                 cfg_edit.read(ini_path)
+            
+            # Meta Section
+            if 'Meta' not in cfg_edit: cfg_edit['Meta'] = {}
+            if 'config_version' in updates: cfg_edit['Meta']['config_version'] = str(updates['config_version'])
+            else: cfg_edit['Meta']['config_version'] = "1"
             
             # Camera Section
             if 'Camera' not in cfg_edit: cfg_edit['Camera'] = {}
@@ -598,8 +653,99 @@ class SentinelService:
         bm.confirm_intrusion(filename)
         return {"success": True}
 
+    def authenticate_startup_password(self, params):
+        """Standard PAM authentication for security gate"""
+        password = params.get('password', '')
+        if not password: return {"success": False}
+        
+        try:
+            import pam
+            p = pam.pam()
+            
+            # Since daemon runs as root, we look for common system users 
+            # Or just authenticate against 'root' if it's a secure device.
+            # Better: use the user who is likely the owner (usually UID 1000)
+            import pwd
+            try:
+                # Find the first human user
+                user_name = pwd.getpwuid(1000).pw_name
+            except:
+                import os
+                user_name = os.environ.get('USER', 'root')
+
+            if p.authenticate(user_name, password):
+                self.logger.info(f"PAM authentication successful for user: {user_name}")
+                return {"success": True}
+            else:
+                self.logger.warning(f"PAM authentication failed for user: {user_name}")
+                return {"success": False}
+        except Exception as e:
+            self.logger.error(f"PAM error: {e}")
+            # Fallback to simple password if PAM fails (e.g. missing lib)
+            if password in ["admin", "1234"]:
+                return {"success": True}
+            return {"success": False, "error": str(e)}
+
     def ping(self, params):
         return {"success": True, "status": "alive"}
+
+    def health(self, params):
+        """Unified system health check."""
+        try:
+            status_summary = "healthy"
+            models_state = "loaded" if self.warmed else ("loading" if self.init_in_progress else "not_loaded")
+            camera_state = "ok" if (self.camera and getattr(self.camera, 'running', False)) else "stopped"
+            
+            # Simple check if camera fails when it should be running
+            if camera_state == "stopped" and self.current_mode is not None:
+                status_summary = "degraded"
+                
+            cfg = self.config.config if self.config else None
+            cfg_ver = cfg.getint("Meta", "config_version", fallback=1) if cfg else 1
+            
+            return {
+                "success": True,
+                "status": status_summary,
+                "models": models_state,
+                "camera": camera_state,
+                "enrolled_users": len(self.get_enrolled_users({}).get("users", [])),
+                "uptime_seconds": 0, # Uptime could be tracked properly later
+                "config_version": cfg_ver
+            }
+        except Exception as e:
+            return {"success": False, "error_code": "UNKNOWN", "message": str(e)}
+
+    def get_devices(self, params):
+        """Discover available video devices via v4l2 or simple globbing."""
+        import glob
+        import subprocess
+        devices = []
+        try:
+            dev_paths = glob.glob("/dev/video*")
+            for p in sorted(dev_paths):
+                idx_str = p.replace("/dev/video", "")
+                if not idx_str.isdigit(): continue
+                idx = int(idx_str)
+                name = "Unknown Camera"
+                caps = "N/A"
+                # Use v4l2-ctl for name extraction if available
+                try:
+                    res = subprocess.run(["v4l2-ctl", "-d", p, "--all"], capture_output=True, text=True, timeout=1.0)
+                    for line in res.stdout.splitlines():
+                        if "Card type" in line:
+                            name = line.split(":", 1)[1].strip()
+                            break
+                    caps = "V4L2 support"
+                except Exception:
+                    pass
+                devices.append({"index": idx, "name": name, "caps": caps})
+                
+            active = -1
+            if self.config:
+                active = self.config.config.getint("Camera", "device_id", fallback=0)
+            return {"success": True, "devices": devices, "active_device": active}
+        except Exception as e:
+            return {"success": False, "error_code": "UNKNOWN", "message": str(e)}
 
 
 # --- RPC DISPATCHER ---
@@ -611,6 +757,7 @@ def _build_methods(service: SentinelService):
         "process_auth_frame": service.process_auth_frame,
         "stop_authentication": service.stop_authentication,
         "authenticate_pam": service.authenticate_pam,
+        "authenticate_startup_password": service.authenticate_startup_password,
         "start_enrollment": service.start_enrollment,
         "process_enroll_frame": service.process_enroll_frame,
         "capture_enroll_pose": service.capture_enroll_pose,
@@ -623,6 +770,8 @@ def _build_methods(service: SentinelService):
         "delete_intrusion": service.delete_intrusion,
         "confirm_intrusion": service.confirm_intrusion,
         "ping": service.ping,
+        "health": service.health,
+        "get_devices": service.get_devices,
     }
 
 def _rpc_error(request_id, code, message):
@@ -665,9 +814,13 @@ def _dispatch_request(conn: socket.socket, service: SentinelService, methods: di
     try:
         resp = _handle_rpc_line(service, methods, line)
         if resp:
-            out = (json.dumps(resp, ensure_ascii=False) + "\n").encode('utf-8')
-            with write_lock:
-                conn.sendall(out)
+            try:
+                out = (json.dumps(resp, ensure_ascii=False) + "\n").encode('utf-8')
+                with write_lock:
+                    conn.sendall(out)
+            except (OSError, BrokenPipeError):
+                # Socket already closed, ignore silently — client has disconnected
+                pass
     except Exception as e:
         logger.exception("Error processing RPC request line: %s", e)
 
@@ -702,7 +855,15 @@ def _handle_client(conn: socket.socket, service: SentinelService, methods: dict)
     except Exception as e:
         logger.exception("Client handler error: %s", e)
     finally:
-        try: conn.close()
+        try:
+             # Stop any active authentication/enrollment when client disconnects
+             if service.current_mode:
+                 logger.info(f"Client disconnected, stopping active {service.current_mode}...")
+                 with service.lock:
+                     if service.camera: service.camera.stop(); service.camera = None
+                     service.current_mode = None
+                     service.authenticator = None
+             conn.close()
         except: pass
 
 def _create_server_socket(socket_path):

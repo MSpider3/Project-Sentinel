@@ -14,6 +14,9 @@ Environment=TF_CPP_MIN_LOG_LEVEL=3
 Environment=GLOG_minloglevel=3
 Environment=LIBGL_DEBUG=quiet
 Environment=MESA_DEBUG=silent
+# Prevent Python from writing __pycache__ into /usr/lib (SELinux denies it)
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPYCACHEPREFIX=/tmp/sentinel-pycache
 
 # Create /run/sentinel directory automatically
 RuntimeDirectory=sentinel

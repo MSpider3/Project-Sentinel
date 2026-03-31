@@ -54,7 +54,8 @@ def setup_audit_logger():
     
     # Check if handler already exists to avoid duplicates
     if not audit_logger.handlers:
-        log_dir = "logs"
+        import sentinel_logger
+        log_dir = getattr(sentinel_logger, 'LOG_DIR', "/var/log/sentinel")
         os.makedirs(log_dir, exist_ok=True)
         
         # Run cleanup first
@@ -114,17 +115,17 @@ class BiometricConfig:
         
         # Determine paths intelligently: prefer local dev environment, fall back to system install
         local_model_dir = os.path.join(os.getcwd(), 'models')
-        system_model_dir = '/var/lib/project-sentinel/models'
+        system_model_dir = '/usr/lib/project-sentinel/models'
         system_blacklist_dir = '/var/lib/project-sentinel/blacklist'
         
-        # Use local models/ if it exists (development mode)
-        if os.path.exists(local_model_dir):
-            self.MODEL_DIR = local_model_dir
-            self.BLACKLIST_DIR = os.path.join(os.getcwd(), 'models', 'blacklist')
-        # Otherwise use system paths (installed mode)
-        else:
+        # Use system paths if they exist (setup.sh creates them)
+        if os.path.exists(system_model_dir):
             self.MODEL_DIR = system_model_dir
             self.BLACKLIST_DIR = system_blacklist_dir
+        # Otherwise fall back to local dev mode paths
+        else:
+            self.MODEL_DIR = local_model_dir
+            self.BLACKLIST_DIR = os.path.join(os.getcwd(), 'models', 'blacklist')
         
         # Root-level system config
         system_config = '/etc/project-sentinel/config.ini'
@@ -185,6 +186,8 @@ class BiometricConfig:
 
     def _resolve_camera_index(self):
         """Auto-detects IR camera if configured, otherwise uses index."""
+        if self.config.has_option('Camera', 'device_id'):
+            return self.config.getint('Camera', 'device_id', fallback=0)
         config_idx = self.config.getint('Camera', 'index', fallback=0)
         return config_idx
         
@@ -348,7 +351,7 @@ class BiometricProcessor:
                     dummy_face = np.zeros((1, 3, h, w), dtype=np.float32)
                     self.face_recognizer.run(None, {self.recognizer_input_name: dummy_face})
                 
-                self.spoof_detector.predict(dummy_img)
+                self.spoof_detector.predict(dummy_img, np.array([0, 0, 100, 100]))
             except Exception as e:
                 self.logger.warning(f"Warmup failed (non-fatal): {e}")
                 

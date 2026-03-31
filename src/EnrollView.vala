@@ -21,10 +21,12 @@ namespace Sentinel {
         private Gtk.Label hud_instruction;
         private Gtk.Label hud_status;
         private Gtk.ProgressBar hud_progress;
+        public signal void enrollment_completed ();
 
         // Auto-capture logic
         private int ready_frame_counter = 0;
-        private const int AUTO_CAPTURE_THRESHOLD = 45; // ~1.5 seconds at 30fps
+        private const int AUTO_CAPTURE_THRESHOLD = 125; // ~5+ seconds at standard FPS
+        private bool is_waiting_for_user_ready = false;
 
         private bool is_enrolling = false;
 
@@ -184,6 +186,8 @@ namespace Sentinel {
             capture_controls.visible = true;
             is_enrolling = true;
             ready_frame_counter = 0;
+            is_waiting_for_user_ready = true; // Wait for initial "Continue"
+            capture_button.label = "Start First Pose";
 
             // Start serial async loop instead of timer
             run_enroll_loop.begin ();
@@ -193,7 +197,7 @@ namespace Sentinel {
         private async void run_enroll_loop () {
             while (is_enrolling) {
                 yield process_enroll_frame ();
-                yield nap (10);
+                yield nap (66);
             }
         }
 
@@ -282,14 +286,20 @@ namespace Sentinel {
             }
 
             // --- AUTO CAPTURE LOGIC ---
+            if (is_waiting_for_user_ready) {
+                hud_status.label = "Next position ready? (Click Continue)";
+                camera_preview.set_box_color_from_string ("#888888"); // Grey
+                return;
+            }
+
             if (status == "ready") {
                 ready_frame_counter++;
                 camera_preview.set_box_color_from_string ("#00FF00"); // Green
 
                 int remaining = AUTO_CAPTURE_THRESHOLD - ready_frame_counter;
                 if (remaining > 0) {
-                    int secs = (remaining / 15) + 1; // approx
-                    hud_status.label = "Hold still... %d".printf (secs);
+                    int secs = (remaining / 15) + 1; // approx @ 15fps
+                    hud_status.label = "Keep this pose: %d sec...".printf (secs);
                 } else {
                     hud_status.label = "Capturing...";
                     capture_pose.begin (); // TRIGGER CAPTURE
@@ -322,6 +332,13 @@ namespace Sentinel {
         }
 
         private void on_capture_clicked () {
+            if (is_waiting_for_user_ready) {
+                is_waiting_for_user_ready = false;
+                capture_button.label = "Capture Now";
+                hud_status.label = "Perfect! Hold that position...";
+                ready_frame_counter = 0;
+                return;
+            }
             capture_pose.begin ();
         }
 
@@ -350,12 +367,15 @@ namespace Sentinel {
                 var message = result_obj.get_string_member ("message");
                 var dialog = new Gtk.AlertDialog (message);
                 dialog.show (null);
+                enrollment_completed ();
                 stop_enrollment.begin ();
                 return;
             }
 
             capture_button.sensitive = true;
-            // Success acts as reset for next pose
+            // Pose captured. Wait for user to transition to next pose.
+            is_waiting_for_user_ready = true;
+            capture_button.label = "Continue to next";
             ready_frame_counter = 0;
         }
 
@@ -370,6 +390,7 @@ namespace Sentinel {
 
             setup_box.visible = true;
             camera_preview.visible = false;
+            camera_preview.clear_frame ();
             capture_controls.visible = false;
 
             name_entry.text = "";

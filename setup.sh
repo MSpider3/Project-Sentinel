@@ -124,11 +124,14 @@ fi
 success "AI models check complete."
 echo ""
 
-# 2. Compile Vala App
+# 2. Setup TUI Environment
 echo ""
-run_cmd "Configuring meson build environment..." meson setup builddir --prefix=/usr --wipe
-run_cmd "Compiling Vala UI..." ninja -C builddir
-success "UI Compilation complete."
+info "Preparing TUI Interface..."
+if ! command -v uv &> /dev/null; then
+    run_cmd "Installing uv package manager..." curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+success "TUI Environment Ready."
 
 # 3. Full System Install
 echo ""
@@ -140,15 +143,22 @@ info "Performing Full System Install..."
     mkdir -p "$PROJECT_ETC"
     chmod 700 "$PROJECT_VAR"
     
-    # Copy Compiled Binary
-    cp builddir/sentinel-ui "$PROJECT_LIB/sentinel-val-app"
-    chmod +x "$PROJECT_LIB/sentinel-val-app"
+    # Configure global 'sentinel' command
+    cat << 'EOF' > /usr/bin/sentinel
+#!/bin/bash
+export SENTINEL_SOCKET_PATH=/run/sentinel/sentinel.sock
+cd /usr/lib/project-sentinel
+uv run sentinel-tui "$@"
+EOF
+    chmod +x /usr/bin/sentinel
+    success "Created global 'sentinel' command."
     
     # Copy Python Code and Packaging
-    cp -r src "$PROJECT_LIB/" 2>/dev/null || true
-    cp *.py "$PROJECT_LIB/"
-    cp requirements.txt "$PROJECT_LIB/"
+    cp core/*.py "$PROJECT_LIB/" 2>/dev/null || true
+    cp -r sentinel-tui "$PROJECT_LIB/"
     cp pyproject.toml "$PROJECT_LIB/"
+    cp uv.lock "$PROJECT_LIB/"
+    cp Makefile "$PROJECT_LIB/"
     
     # Copy AI Models (daemon reads these from its CWD = /usr/lib/project-sentinel)
     info "Copying AI models..."
@@ -156,17 +166,16 @@ info "Performing Full System Install..."
     cp -r models/. "$PROJECT_LIB/models/"
     success "AI models copied."
     
-    # Python Venv
-    if [ ! -d "$PROJECT_LIB/venv" ]; then
-        run_cmd "Creating Python Virtual Environment..." python3 -m venv "$PROJECT_LIB/venv"
-    fi
-    
-    # Install dependencies gracefully using pyproject.toml
-    run_cmd "Installing Python backend packages (this may take some time depending on your internet speed)..." "$PROJECT_LIB/venv/bin/pip" install "$PROJECT_LIB"
+    # Python Venv and Dependencies via uv
+    info "Installing Python dependencies natively using uv..."
+    cd "$PROJECT_LIB"
+    uv sync
+    cd "$CURRENT_DIR"
+    success "Dependencies locked and loaded."
     
     # Config
     if [ ! -f "$PROJECT_ETC/config.ini" ]; then
-        cp config.ini "$PROJECT_ETC/" 2>/dev/null || warn "Creating default config..."
+        cp backend/config.ini "$PROJECT_ETC/" 2>/dev/null || warn "Creating default config..."
     fi
     
     # Service
@@ -174,7 +183,7 @@ info "Performing Full System Install..."
     cp "$SERVICE_FILE" "/etc/systemd/system/"
     systemctl daemon-reload
     systemctl enable sentinel-backend
-    systemctl restart sentinel-backend
+
     
     # Desktop Application Launcher
     if [ -f "packaging/sentinel-ui.desktop" ]; then
@@ -183,17 +192,11 @@ info "Performing Full System Install..."
     fi
     
     # Client Script (for PAM)
-    cp sentinel_client.py /usr/bin/sentinel_client.py
+    cp backend/sentinel_client.py /usr/bin/sentinel_client.py
     chmod +x /usr/bin/sentinel_client.py
     
     # Fix camera access: ensure the video group exists and allow V4L2 from systemd
     info "Configuring camera device access..."
-    if command -v setsebool &>/dev/null; then
-        # Allow systemd services to read/write v4l2 devices on SELinux (Fedora)
-        setsebool -P httpd_use_openstack 0 &>/dev/null || true
-        # The key rule: allow unconfined to mmap
-        semanage boolean -m --on allow_domain_fd_use &>/dev/null || true
-    fi
     # Set video device permissions so the video group can access them
     for dev in /dev/video*; do
         [ -e "$dev" ] && chmod 660 "$dev" && chown root:video "$dev" || true
@@ -204,13 +207,72 @@ info "Performing Full System Install..."
         usermod -aG video "$REAL_USER" 2>/dev/null && \
             success "Added $REAL_USER to 'video' group (re-login required)" || true
     fi
-    
+
+    # ── SELinux: Fix __pycache__ writes ───────────────────────────────────────
+    # Pre-compile all Python files so the daemon never needs to write .pyc at runtime.
+    # This eliminates the AVC denial: init_t trying to add_name to lib_t dirs.
+    if [ -d "$PROJECT_LIB/venv" ]; then
+        info "Pre-compiling Python bytecode (prevents SELinux __pycache__ denial)..."
+        "$PROJECT_LIB/venv/bin/python3" -m compileall -q "$PROJECT_LIB/" 2>/dev/null || true
+        success "Python bytecode pre-compiled."
+    fi
+
+    # ── SELinux: Relabel project lib directory as bin_t ───────────────────────
+    # init_t is allowed to execute/read bin_t but not lib_t. Relabeling the
+    # project dir allows the daemon to properly import Python modules.
+    if command -v chcon &>/dev/null; then
+        info "Applying SELinux file context to project lib..."
+        chcon -R -t bin_t "$PROJECT_LIB/" 2>/dev/null || true
+        success "SELinux context set to bin_t for $PROJECT_LIB/"
+    fi
+
+    # ── SELinux: Generate camera access policy module ─────────────────────────
+    # Allow the daemon (running as init_t) to open v4l_device_t camera devices.
+    if command -v audit2allow &>/dev/null && command -v semodule &>/dev/null; then
+        info "Generating SELinux policy module for camera (v4l) access..."
+        # Use /run dir — writable by root under SELinux (unlike /tmp which has tmp_t)
+        mkdir -p /run/sentinel-setup
+        cat > /run/sentinel-setup/sentinel-cam.te << 'SEMODULE_EOF'
+module sentinel-cam 1.0;
+
+require {
+    type init_t;
+    type v4l_device_t;
+    class chr_file { read write ioctl open getattr };
+    class blk_file { read write ioctl open getattr };
+}
+
+# Allow sentinel daemon (init_t) to access V4L2 camera devices
+allow init_t v4l_device_t:chr_file { read write ioctl open getattr };
+SEMODULE_EOF
+
+        # Compile and install the module
+        if checkmodule -M -m -o /run/sentinel-setup/sentinel-cam.mod /run/sentinel-setup/sentinel-cam.te 2>/dev/null && \
+           semodule_package -o /run/sentinel-setup/sentinel-cam.pp -m /run/sentinel-setup/sentinel-cam.mod 2>/dev/null && \
+           semodule -i /run/sentinel-setup/sentinel-cam.pp 2>/dev/null; then
+            success "SELinux camera policy module installed (sentinel-cam)."
+        else
+            warn "Could not install SELinux policy module automatically."
+            warn "If camera fails, run manually:"
+            warn "  sudo ausearch -m avc -c sentinel-daemon | audit2allow -M sentinel-cam"
+            warn "  sudo semodule -i sentinel-cam.pp"
+        fi
+        rm -rf /run/sentinel-setup
+    fi
+
+
     # Secure the log directory (root-only, requires sudo to read)
     mkdir -p /var/log/sentinel
     chmod 750 /var/log/sentinel
     chown root:root /var/log/sentinel
-    
+
+    # Reload and restart with all fixes applied
+    cp "$SERVICE_FILE" "/etc/systemd/system/"
+    systemctl daemon-reload
+    systemctl restart sentinel-backend
+
     success "Full Installation Complete."
+
 
 echo ""
 echo -e "${YELLOW}==========================================${NC}"

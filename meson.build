@@ -30,6 +30,7 @@ executable('sentinel-ui',
   'src/CameraPreview.vala',
   'src/IntrusionReviewDialog.vala',
   'src/SettingsView.vala',
+  'src/LoginView.vala',
   dependencies: [
     gtk4_dep,
     libadwaita_dep,

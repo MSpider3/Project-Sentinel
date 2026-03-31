@@ -7,6 +7,9 @@ namespace Sentinel {
         private Gtk.Stack stack;
         private AuthView auth_view;
         private EnrollView enroll_view;
+        private SettingsView settings_view;
+        private LoginView login_view;
+        private Gtk.Overlay overlay;
 
         public MainWindow (Gtk.Application app) {
             Object (application: app);
@@ -34,28 +37,51 @@ namespace Sentinel {
 
             // Main stack
             stack = new Gtk.Stack ();
+            stack.vexpand = true;
+            stack.hexpand = true;
             stack.transition_type = Gtk.StackTransitionType.SLIDE_LEFT_RIGHT;
             stack_switcher.stack = stack;
 
-            // Authentication view
+            // 1. Authentication view
             auth_view = new AuthView (backend);
             stack.add_titled (auth_view, "auth", "Authenticate");
 
-            // Enrollment view
+            // 2. Enrollment view
             enroll_view = new EnrollView (backend);
             stack.add_titled (enroll_view, "enroll", "Enroll");
+            
+            // 3. Settings view
+            settings_view = new SettingsView (backend);
+            stack.add_titled (settings_view, "settings", "Settings");
 
-            set_child (stack);
+            // 4. Login view (Secure Startup Overlay)
+            login_view = new LoginView (backend);
+            login_view.authenticated.connect (() => {
+                login_view.visible = false;
+                stack.visible = true;
+                header.sensitive = true;
+            });
+
+            overlay = new Gtk.Overlay ();
+            overlay.set_child (stack);
+            overlay.add_overlay (login_view);
+            
+            // Initial State: Locked
+            stack.visible = false;
+            header.sensitive = false;
+            set_child (overlay);
+            
+            // Connect Signals for immediate UX
+            enroll_view.enrollment_completed.connect (() => {
+                 auth_view.refresh_users.begin ();
+                 stack.set_visible_child_name ("auth");
+            });
 
             // Apply styling
             var css_provider = new Gtk.CssProvider ();
-            // Try loading from local path (development) or install path
-            // For now, assuming running from project root
             var css_file = File.new_for_path ("src/style.css");
             css_provider.load_from_file (css_file);
 
-
-            // Add CSS provider to display
             Gtk.StyleContext.add_provider_for_display (
                                                        Gdk.Display.get_default (),
                                                        css_provider,
@@ -97,8 +123,6 @@ namespace Sentinel {
                         var users_arr = u_obj.get_array_member ("users");
                         if (users_arr.get_length () == 0) {
                             stack.set_visible_child_name ("enroll");
-                            var tut = new Gtk.AlertDialog ("Welcome to Project Sentinel!\nNo users are enrolled yet. Please enroll your face to get started.");
-                            tut.show (this);
                         }
                     }
                 }
@@ -115,4 +139,4 @@ namespace Sentinel {
             base.dispose ();
         }
     }
-} // namespace Sentinel
+}

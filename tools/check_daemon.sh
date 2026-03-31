@@ -8,6 +8,31 @@ echo "==== Sentinel Daemon Diagnostics $(date) ====" | tee "$OUT"
 
 section() { echo -e "\n\n### $1 ###" | tee -a "$OUT"; }
 
+# ── 0. Camera device quick probe ─────────────────────────────────────────────
+section "Camera Device Status"
+echo "User: $(id)" | tee -a "$OUT"
+echo "Video devices:" | tee -a "$OUT"
+ls -la /dev/video* 2>&1 | tee -a "$OUT"
+echo "" | tee -a "$OUT"
+echo "Current sentinel-backend service groups:" | tee -a "$OUT"
+systemctl show sentinel-backend.service -p SupplementaryGroups 2>&1 | tee -a "$OUT"
+echo "" | tee -a "$OUT"
+echo "SELinux status:" | tee -a "$OUT"
+sestatus 2>/dev/null | head -5 | tee -a "$OUT" || echo "sestatus not found" | tee -a "$OUT"
+echo "" | tee -a "$OUT"
+echo "Recent SELinux AVC denials for video/v4l:" | tee -a "$OUT"
+ausearch -m AVC -ts recent 2>/dev/null | grep -i "v4l\|video" | head -20 | tee -a "$OUT" || echo "(ausearch not available or no denials)" | tee -a "$OUT"
+echo "" | tee -a "$OUT"
+echo "Test raw device open as current user:" | tee -a "$OUT"
+for dev in /dev/video0 /dev/video1; do
+    if [ -e "$dev" ]; then
+        if python3 -c "import os; fd=os.open('$dev', os.O_RDONLY|os.O_NONBLOCK); os.close(fd); print('$dev: READABLE')" 2>&1 | tee -a "$OUT"; then true
+        else echo "$dev: FAILED" | tee -a "$OUT"; fi
+    else
+        echo "$dev: NOT FOUND" | tee -a "$OUT"
+    fi
+done
+
 # ── 1. Systemd service status ────────────────────────────────────────────────
 section "systemctl status"
 systemctl status sentinel-backend.service --no-pager 2>&1 | tee -a "$OUT"

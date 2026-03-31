@@ -1,0 +1,2 @@
+SUBSYSTEM=="video4linux", GROUP="video", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="video4linux", ATTR{index}=="0", SYMLINK+="camera0"

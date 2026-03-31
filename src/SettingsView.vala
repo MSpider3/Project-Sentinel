@@ -34,7 +34,7 @@ namespace Sentinel {
             set_margin_end (12);
 
             // Header
-            var title = new Gtk.Label ("<b>Configuration</b>");
+            var title = new Gtk.Label ("Configuration");
             title.use_markup = true;
             title.halign = Gtk.Align.START;
             append (title);

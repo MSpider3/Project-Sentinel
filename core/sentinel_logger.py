@@ -9,13 +9,19 @@ Log file location (in priority order):
   1. $SENTINEL_LOG_DIR/sentinel.log    (user-defined override)
   2. /var/log/sentinel/sentinel.log    (standard — created by systemd LogsDirectory=sentinel)
   3. /tmp/sentinel_debug.log           (fallback for non-root testing)
+
+Retention policy:
+  - Rotates daily at midnight.
+  - Keeps 30 days of history (backupCount=30).
+  - Archived files are named: sentinel.log.YYYY-MM-DD
+  - Log lines are written as JSON for machine-readable parsing.
 """
 
 import os
 import sys
 import logging
 import traceback
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 
 # ── Determine a writable log directory ───────────────────────────────────────
 
@@ -51,6 +57,21 @@ LOG_FILE = os.path.join(LOG_DIR, "sentinel.log")
 
 # ── Formatter ─────────────────────────────────────────────────────────────────
 
+class JSONFormatter(logging.Formatter):
+    """JSON structured log lines."""
+    def format(self, record):
+        import json
+        from datetime import datetime
+        log_obj = {
+            "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "level": record.levelname,
+            "component": record.name.split('.')[-1] if '.' in record.name else record.name,
+            "message": record.getMessage()
+        }
+        if record.exc_info:
+            log_obj["traceback"] = "".join(traceback.format_exception(*record.exc_info)).rstrip()
+        return json.dumps(log_obj)
+
 class PlainFormatter(logging.Formatter):
     """Human-readable log lines, easy to grep."""
     FMT = "%(asctime)s  [%(levelname)-8s]  %(name)s — %(message)s"
@@ -81,16 +102,20 @@ def setup(name: str = "Sentinel", level: int = logging.DEBUG) -> logging.Logger:
     root = logging.getLogger(name)
     root.setLevel(level)
 
-    # 1. Rotating file handler — keeps last 5 × 10 MB of logs
+    # 1. Daily rotating file handler — one file per day, 30-day FIFO retention
     try:
-        fh = RotatingFileHandler(
+        fh = TimedRotatingFileHandler(
             LOG_FILE,
-            maxBytes=10 * 1024 * 1024,   # 10 MB
-            backupCount=5,
+            when="midnight",     # rotate at 00:00 local time
+            interval=1,          # every 1 day
+            backupCount=30,      # keep 30 days of history, then delete oldest
             encoding="utf-8",
+            utc=False,           # use local system time for rollover
         )
+        # Archived files: sentinel.log.YYYY-MM-DD
+        fh.suffix = "%Y-%m-%d"
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(PlainFormatter())
+        fh.setFormatter(JSONFormatter())
         root.addHandler(fh)
     except Exception as e:
         print(f"[sentinel_logger] WARNING: Cannot open log file {LOG_FILE}: {e}", file=sys.stderr)

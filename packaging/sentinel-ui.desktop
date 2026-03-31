@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Project Sentinel
 Comment=Biometric Facial Authentication System
-Exec=/usr/lib/project-sentinel/sentinel-val-app
+Exec=sentinel-ui
 Icon=security-high-symbolic
 Terminal=false
 Type=Application
