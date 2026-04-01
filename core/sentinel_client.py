@@ -9,6 +9,8 @@ import sys
 import json
 import os
 import signal
+import pwd
+import glob
 
 SOCKET_PATH = os.environ.get('SENTINEL_SOCKET_PATH', "/run/sentinel/sentinel.sock")
 
@@ -30,11 +32,47 @@ def main():
     try:
         sock.connect(SOCKET_PATH)
         
-        # Request
+        # Capture GUI context for preview window
+        display = os.environ.get('DISPLAY')
+        xauth = os.environ.get('XAUTHORITY')
+        
+        # If running via sudo/pam_exec, env might be stripped.
+        # Try to find the user's GUI session.
+        if not display:
+            # Common default for first local user
+            display = ":0"
+            
+        if not xauth and user:
+            # Try common locations for .Xauthority
+            # 1. /home/user/.Xauthority
+            home_xauth = os.path.expanduser(f"~{user}/.Xauthority")
+            if os.path.exists(home_xauth):
+                xauth = home_xauth
+            # 2. /run/user/<uid>/xauth_... (Fedora/GNOME)
+            else:
+                try: 
+                    uid = pwd.getpwnam(user).pw_uid
+                    run_dir = f"/run/user/{uid}"
+                    if os.path.exists(run_dir):
+                        import glob
+                        matches = glob.glob(os.path.join(run_dir, "xauth_*"))
+                        if matches: xauth = matches[0]
+                except: pass
+
+        gui_context = {
+            "display": display,
+            "xauthority": xauth
+        }
+        
+        # Request validation for ANY enrolled user by sending None if we want global auth
+        # For a personal laptop, letting any enrolled face unlock sudo is preferred.
         req = {
             "jsonrpc": "2.0",
             "method": "authenticate_pam",
-            "params": {"user": user},
+            "params": {
+                "user": None,
+                "gui_context": gui_context
+            },
             "id": 100
         }
         

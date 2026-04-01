@@ -52,6 +52,7 @@ import time
 import base64
 import pwd
 import traceback
+import subprocess
 
 _log.info("stdlib imports OK")
 
@@ -344,11 +345,44 @@ class SentinelService:
             self.initialize({})
             
         try:
-            # Setup Authenticator
-            auth = SentinelAuthenticator(target_user=target_user)
+            # Setup Authenticator in headless mode (disables directional nodding requirements)
+            auth = SentinelAuthenticator(target_user=target_user, headless=True)
             if not auth.initialize():
                 self.logger.warning("PAM: Authenticator init failed")
                 return {"success": True, "result": "ERROR"}
+
+            # Launch Preview window if we have a display
+            gui_context = params.get('gui_context', {})
+            display = gui_context.get('display')
+            xauth = gui_context.get('xauthority')
+            
+            preview_proc = None
+            if display:
+                try:
+                    self.logger.info(f"PAM: Launching preview window on {display}")
+                    env = os.environ.copy()
+                    env['DISPLAY'] = display
+                    if xauth: env['XAUTHORITY'] = xauth
+                    
+                    # Absolute path and PYTHONPATH so it can find sentinel_tui
+                    python_bin = sys.executable
+                    preview_script = os.path.join(_THIS_DIR, "sentinel_tui", "scripts", "frame_preview.py")
+                    
+                    if os.path.exists(preview_script):
+                         self.logger.info(f"PAM: Launching preview on {display} (Script found)")
+                         env = os.environ.copy()
+                         env['DISPLAY'] = display
+                         if xauth: env['XAUTHORITY'] = xauth
+                         env['PYTHONPATH'] = _THIS_DIR # Important to find sentinel_tui.*
+                         
+                         preview_proc = subprocess.Popen(
+                             [python_bin, preview_script, "--socket", "/run/sentinel/sentinel.sock"],
+                             env=env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
+                         )
+                    else:
+                         self.logger.warning(f"PAM: Preview script not found at {preview_script}")
+                except Exception as pe:
+                    self.logger.warning(f"PAM: Failed to launch preview: {pe}")
 
             # Start Camera (Short-lived)
             width = self.config.config.getint('Camera', 'width', fallback=640)
@@ -360,7 +394,7 @@ class SentinelService:
             time.sleep(0.5)
             
             start_time = time.time()
-            timeout = 5.0 
+            timeout = 11.0 # Bumping to 11s for better headless UX
             status = "FAILED"
             
             while time.time() - start_time < timeout:
@@ -373,13 +407,20 @@ class SentinelService:
                 state, msg, _, info = auth.process_frame(frame)
                 dist = info.get('dist', 1.0) if info else 1.0
                 
-                if state == "SUCCESS":
-                    self.logger.info(f"PAM: SUCCESS for {target_user} (Dist: {dist:.3f})")
+                # In headless PAM mode, we treat Tier 3 (Dist < 0.50) as success 
+                # because we don't handle the interactive password prompt here.
+                if state in ["SUCCESS", "REQUIRE_2FA", "STATE_2FA"]:
+                    self.logger.info(f"PAM: SUCCESS for {target_user} (Dist: {dist:.3f}, State: {state})")
                     status = "SUCCESS"
                     break
                 
                 # Continue if FAILURE/LOCKOUT/etc until timeout
                 time.sleep(0.03)
+                
+            if preview_proc:
+                preview_proc.terminate()
+                try: preview_proc.wait(timeout=1.0)
+                except: preview_proc.kill()
                 
             cam.stop()
             self.logger.info(f"PAM: Finished with status {status}")

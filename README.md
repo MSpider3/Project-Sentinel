@@ -20,7 +20,7 @@ Built for **Fedora / Wayland** | Powered by **ONNX Runtime** & **MediaPipe** | P
 ---
 
 > [!NOTE]
-> **TUI Client Ready**
+> **🚧 TUI Client Work in Progress 🚧**
 >
 > Project Sentinel now includes a highly responsive, standalone **Terminal User Interface (TUI)** built with Python and Textual to control the background biometric daemon. You can enroll faces, manage settings, view live HD camera previews, and monitor intrusion logs directly from your terminal!
 

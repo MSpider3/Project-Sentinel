@@ -848,13 +848,14 @@ class SentinelAuthenticator:
     STATE_LOCKOUT = "LOCKOUT"
     STATE_2FA = "REQUIRE_2FA" # New State
     
-    def __init__(self, target_user=None):
+    def __init__(self, target_user=None, headless=False):
         self.config = BiometricConfig()
         self.processor = BiometricProcessor(self.config)
         self.store = FaceEmbeddingStore()
         self.validator = LivenessValidator(self.config)
         self.blacklist_manager = BlacklistManager()
         self.adaptive_manager = None # Lazy init per user
+        self.headless = headless
         
         # Initialize audit logger here to avoid import-time stdout noise
         self.audit_log = setup_audit_logger()
@@ -1030,6 +1031,9 @@ class SentinelAuthenticator:
                          self.state = self.STATE_RECOGNIZED
                          self.matched_user = user
                          self.validator.start_session()
+                         if self.headless:
+                             self.validator.checklist["challenge"] = True # Skip directional nod for PAM
+                             self.validator.checklist["blink"] = True     # Skip blink for PAM
                          self.message = f"Hi {user}! {self.validator.challenge_type}"
                          self.log_audit("INFO", f"User recognized (Tier {tier}), starting challenges")
                          
