@@ -151,7 +151,9 @@ mkdir -p "$PROJECT_LIB/core"
 mkdir -p "$PROJECT_VAR"/{models,blacklist,gallery,adaptive,intrusions}
 mkdir -p "$PROJECT_ETC"
 chmod 700 "$PROJECT_VAR"
-success "Directories created."
+touch /var/log/sentinel/preview.log
+chmod 666 /var/log/sentinel/preview.log
+success "Directories and log files created."
 
 # ── Step 5: Install Core Daemon Modules ─────────────────────────────────────
 # IMPORTANT: We copy core/*.py directly to BOTH:

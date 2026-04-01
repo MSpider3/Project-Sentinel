@@ -359,30 +359,39 @@ class SentinelService:
             preview_proc = None
             if display:
                 try:
-                    self.logger.info(f"PAM: Launching preview window on {display}")
-                    env = os.environ.copy()
-                    env['DISPLAY'] = display
-                    if xauth: env['XAUTHORITY'] = xauth
+                    # Root for all system-wide sentinel resources
+                    SENTINEL_ROOT = "/usr/lib/project-sentinel"
                     
-                    # Absolute path and PYTHONPATH so it can find sentinel_tui
-                    python_bin = sys.executable
-                    preview_script = os.path.join(_THIS_DIR, "sentinel_tui", "scripts", "frame_preview.py")
+                    # Use fixed absolute path to avoid venv/site-packages confusion
+                    python_bin = os.path.join(SENTINEL_ROOT, "venv", "bin", "python3")
+                    if not os.path.exists(python_bin):
+                         python_bin = sys.executable # Fallback
+                         
+                    preview_script = os.path.join(SENTINEL_ROOT, "sentinel_tui", "scripts", "frame_preview.py")
                     
                     if os.path.exists(preview_script):
-                         self.logger.info(f"PAM: Launching preview on {display} (Script found)")
+                         self.logger.info(f"PAM: Launching preview window on {display}")
                          env = os.environ.copy()
                          env['DISPLAY'] = display
                          if xauth: env['XAUTHORITY'] = xauth
-                         env['PYTHONPATH'] = _THIS_DIR # Important to find sentinel_tui.*
+                         env['PYTHONPATH'] = SENTINEL_ROOT
                          
-                         preview_proc = subprocess.Popen(
-                             [python_bin, preview_script, "--socket", "/run/sentinel/sentinel.sock"],
-                             env=env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
-                         )
+                         # Redirect stdout/stderr to a dedicated log for debugging GUI issues
+                         # Permission note: daemon runs as root, so it can write to /var/log/sentinel/
+                         log_path = "/var/log/sentinel/preview.log"
+                         with open(log_path, "a") as log_file:
+                             log_file.write(f"\n--- Starting preview session: {time.ctime()} ---\n")
+                             log_file.flush()
+                             
+                             preview_proc = subprocess.Popen(
+                                 [python_bin, preview_script, "--socket", "/run/sentinel/sentinel.sock"],
+                                 env=env, stderr=log_file, stdout=log_file,
+                                 # Ensure we don't block the daemon if the window sits there
+                             )
                     else:
-                         self.logger.warning(f"PAM: Preview script not found at {preview_script}")
+                         self.logger.warning(f"PAM: Preview script NOT FOUND at {preview_script}")
                 except Exception as pe:
-                    self.logger.warning(f"PAM: Failed to launch preview: {pe}")
+                    self.logger.warning(f"PAM: Failed to launch preview subprocess: {pe}")
 
             # Start Camera (Short-lived)
             width = self.config.config.getint('Camera', 'width', fallback=640)
@@ -409,6 +418,7 @@ class SentinelService:
                 
                 # In headless PAM mode, we treat Tier 3 (Dist < 0.50) as success 
                 # because we don't handle the interactive password prompt here.
+                # States: SUCCESS, REQUIRE_2FA, STATE_2FA
                 if state in ["SUCCESS", "REQUIRE_2FA", "STATE_2FA"]:
                     self.logger.info(f"PAM: SUCCESS for {target_user} (Dist: {dist:.3f}, State: {state})")
                     status = "SUCCESS"
@@ -418,9 +428,12 @@ class SentinelService:
                 time.sleep(0.03)
                 
             if preview_proc:
+                self.logger.info("PAM: Terminating preview window...")
                 preview_proc.terminate()
-                try: preview_proc.wait(timeout=1.0)
-                except: preview_proc.kill()
+                try: 
+                    preview_proc.wait(timeout=1.0)
+                except: 
+                    preview_proc.kill()
                 
             cam.stop()
             self.logger.info(f"PAM: Finished with status {status}")

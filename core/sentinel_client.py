@@ -36,28 +36,32 @@ def main():
         display = os.environ.get('DISPLAY')
         xauth = os.environ.get('XAUTHORITY')
         
-        # If running via sudo/pam_exec, env might be stripped.
-        # Try to find the user's GUI session.
+        # If running via sudo/pam_exec, env is likely stripped. 
+        # Attempt to find the user's active graphical session.
         if not display:
-            # Common default for first local user
-            display = ":0"
+            display = ":0" # Most common local display
             
         if not xauth and user:
-            # Try common locations for .Xauthority
-            # 1. /home/user/.Xauthority
-            home_xauth = os.path.expanduser(f"~{user}/.Xauthority")
-            if os.path.exists(home_xauth):
-                xauth = home_xauth
-            # 2. /run/user/<uid>/xauth_... (Fedora/GNOME)
-            else:
-                try: 
-                    uid = pwd.getpwnam(user).pw_uid
+            # 1. Try common locations for .Xauthority based on username
+            try:
+                user_info = pwd.getpwnam(user)
+                home_dir = user_info.pw_dir
+                uid = user_info.pw_uid
+                
+                # Check ~/.Xauthority
+                potential_xauth = os.path.join(home_dir, ".Xauthority")
+                if os.path.exists(potential_xauth):
+                    xauth = potential_xauth
+                
+                # 2. Check Fedora-style GNOME path (/run/user/1000/xauth_...)
+                else:
                     run_dir = f"/run/user/{uid}"
                     if os.path.exists(run_dir):
-                        import glob
                         matches = glob.glob(os.path.join(run_dir, "xauth_*"))
-                        if matches: xauth = matches[0]
-                except: pass
+                        if matches:
+                            xauth = matches[0]
+            except Exception:
+                pass
 
         gui_context = {
             "display": display,
