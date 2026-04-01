@@ -10,18 +10,18 @@ Simulates the PAM authentication process within the TUI to verify:
 from __future__ import annotations
 
 import logging
+import subprocess
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import Button, Label, Select
 
-from sentinel_tui.constants import IPC_AUTH_TIMEOUT, IPC_READ_TIMEOUT, ErrorCode
+from sentinel_tui.constants import IPC_AUTH_TIMEOUT, IPC_READ_TIMEOUT, ErrorCode, DEFAULT_SOCKET_PATH
 from sentinel_tui.services.ipc_client import SentinelIPCClient
 
 logger = logging.getLogger(__name__)
 
-class AuthenticationScreen(Screen):
+class AuthenticationScreen(Container):
     """
     Test tool for the authentication pipeline.
     """
@@ -91,6 +91,7 @@ class AuthenticationScreen(Screen):
         super().__init__(**kwargs)
         self._ipc = ipc
         self._auth_active = False
+        self._preview_proc = None  # OpenCV preview subprocess
 
     def compose(self) -> ComposeResult:
         with Container(id="auth-container"):
@@ -150,10 +151,18 @@ class AuthenticationScreen(Screen):
 
     def _do_fetch_users(self) -> None:
         res = self._ipc.call("get_enrolled_users", timeout=IPC_READ_TIMEOUT)
-        users = res.get("users", [])
-        
+
         def _update():
             sel = self.query_one("#select-user", Select)
+            if not res.get("success"):
+                # IPC not ready yet — retry in 3 seconds
+                sel.set_options([("Connecting to daemon...", "")])
+                sel.disabled = True
+                self.query_one("#btn-start", Button).disabled = True
+                self.set_timer(3.0, self._refresh_users)
+                return
+
+            users = res.get("users", [])
             if not users:
                 sel.set_options([("No users found (Go to Enrollment)", "")])
                 sel.disabled = True
@@ -207,16 +216,22 @@ class AuthenticationScreen(Screen):
 
         self._auth_active = True
         self.run_worker(lambda: self._do_start(username), thread=True)
+        # Launch live frame preview window as a detached subprocess
+        self._launch_preview("auth")
 
     def _do_start(self, username: str) -> None:
-        res = self._ipc.call("start_authentication", {"username": username}, timeout=IPC_READ_TIMEOUT)
-        
+        # NOTE: daemon reads param as 'user', not 'username'
+        res = self._ipc.call("start_authentication", {"user": username}, timeout=IPC_READ_TIMEOUT)
+
         def _handle():
             if res.get("success"):
-                self.set_interval(0.2, self._poll_frame)
+                self.set_interval(0.3, self._poll_frame)  # 300ms: prevents worker pileup on slow frames
             else:
+                error_msg = res.get("error", res.get("message", ""))
                 code = res.get("error_code", "UNKNOWN")
-                self.notify(f"Failed to start: {ErrorCode.describe(code)}", severity="error")
+                # Show specific error if we have one, else fall back to error code description
+                display = error_msg if error_msg else ErrorCode.describe(code)
+                self.notify(f"Failed to start: {display}", severity="error")
                 self._auth_active = False
                 self._show_panel("setup")
                 
@@ -233,11 +248,14 @@ class AuthenticationScreen(Screen):
             if not self._auth_active: return
             
             if not res.get("success"):
-                self._stop_test(error="Daemon connection lost")
+                err = res.get("error", res.get("message", "Daemon connection lost"))
+                self._stop_test(error=f"Camera error: {err}")
                 return
                 
             state = res.get("state", "WAITING")
-            dist = res.get("current_distance", 1.0)
+            # Daemon sends current_distance inside the 'info' dict
+            info = res.get("info", {})
+            dist = info.get("dist", res.get("current_distance", 1.0))
             
             # Map distance (0=perfect, 1=no match) to a visual score 0-100%
             # Typically 0.4 is the threshold. We'll make 0.4 = 50% visual bar limit
@@ -266,6 +284,10 @@ class AuthenticationScreen(Screen):
             
             if state in ("SUCCESS", "FAILURE", "LOCKOUT"):
                 self._handle_completion(state, res)
+            elif state == "ERROR":
+                # Camera freeze or processing error — surface the daemon's message
+                err_msg = res.get("message", "Camera error — check daemon logs")
+                self._stop_test(error=err_msg)
             elif state == "RECOGNIZED":
                 box.update("Face Recognized! Checking Liveness...")
             elif state == "LIVENESS_CHALLENGE":
@@ -300,6 +322,7 @@ class AuthenticationScreen(Screen):
     def _stop_test(self, aborted: bool = False, error: str = "") -> None:
         self._auth_active = False
         self.run_worker(lambda: self._ipc.call("stop_authentication"), thread=True)
+        self._kill_preview()
         
         if error:
             self.notify(error, severity="error")
@@ -308,6 +331,30 @@ class AuthenticationScreen(Screen):
             self.notify("Test aborted manually", severity="warning")
             self._show_panel("setup")
 
+    def _launch_preview(self, mode: str) -> None:
+        """Launch frame_preview as a detached module (works from any cwd)."""
+        try:
+            self._kill_preview()
+            self._preview_proc = subprocess.Popen(
+                ["uv", "run", "python", "-m",
+                 "sentinel_tui.scripts.frame_preview",
+                 "--mode", mode,
+                 "--socket", DEFAULT_SOCKET_PATH],
+                start_new_session=True
+            )
+        except Exception as e:
+            logger.warning(f"Could not launch frame preview: {e}")
+
+    def _kill_preview(self) -> None:
+        """Terminate the preview subprocess if running."""
+        if self._preview_proc and self._preview_proc.poll() is None:
+            try:
+                self._preview_proc.terminate()
+            except Exception:
+                pass
+        self._preview_proc = None
+
     def on_unmount(self) -> None:
         if self._auth_active:
             self._stop_test(aborted=True)
+        self._kill_preview()

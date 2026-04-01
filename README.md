@@ -144,56 +144,67 @@ For low-confidence checks, **MediaPipe** maps 468 facial anchor points to perfor
 ---
 
 ## 🛠️ Installation & Setup
-We provide a unified system script to handle dependencies, ONNX model downloads, and basic installation bounds.
+
+A single script handles everything: system dependencies, AI model downloads, Python environments, the systemd service, and permissions.
 
 ### Prerequisites
 
 - **OS:** Fedora 40+ (Recommended) — designed for Wayland/GNOME
 - **Hardware:** Supported V4L2 Webcam
-- **Tooling:** Python 3.10+, `uv` installed.
+- **Python:** 3.10+ (Python 3.14 fully supported)
 
-### Start the Biometric Engine (Daemon)
-
-Before you can interact with the system or login/enroll, the Python background daemon needs context.
-You can run it in your developer mode environment:
+### Install
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/MSpider3/Project-Sentinel.git
 cd Project-Sentinel
 
-# 2. Run the Setup Wizard (must be root)
+# 2. Run the Setup Wizard (must be root — handles everything)
 chmod +x setup.sh
 sudo ./setup.sh
 
-# 3. Run the Daemon globally
-sudo ./venv/bin/python3 core/sentinel_service.py
+# 3. Re-login (so your user gets the 'video' group for camera access)
 ```
 
-> **Note**: For production, standard users should enable the provided `sentinel-backend.service` systemD unit instead of running the python script manually.
+That's it. The daemon starts automatically and runs on every boot via systemd.
+
+### Update / Reinstall
+
+Re-run the same script. It is fully idempotent — re-running applies updates without losing your enrolled faces or config:
+
+```bash
+sudo ./setup.sh
+```
+
+### Developer Quick-Deploy
+
+When iterating on `core/` files without a full reinstall, use `make deploy` instead:
+
+```bash
+make deploy        # Copies core/*.py + sentinel_tui/ to live system, restarts daemon
+```
 
 ---
 
 ## 💻 Using the Sentinel TUI
 
-The Sentinel Control Interface allows you to securely manipulate the root-locked daemon via standard JSON-RPC without requiring `sudo` on every single command.
-
-If you don't use `uv`, please install it first (`pip install uv`).
+The Sentinel Control Interface communicates with the root-locked daemon over a Unix socket using JSON-RPC.
 
 ```bash
-# 1. Install dependencies and text/UI boundaries (only needed once)
-make install-dev
+# Launch the TUI (installed globally by setup.sh)
+sentinel
 
-# 2. Run the main TUI Dashboard
+# Or use make from the project directory
 make run
 ```
 
 ### TUI Features
-- **Global Command**: Launch instantly from anywhere using `sentinel`.
-- **Dashboard**: Track daemon uptime, configuration versions, active cameras, and ONNX states.
-- **Log Viewer**: Live streaming logs, color-coded levels, and component sorting.
-- **Device Manager**: Directly parse `v4l2` cameras and switch `/dev/video*` streams instantly.
-- **Settings Manager**: Automatically pulls backend thresholds, performs field-validations (e.g. integer checks), and hot-reloads the state into the config file.
+- **Dashboard**: Track daemon uptime, configuration versions, active cameras, and model states. Live log streaming with color-coded levels and component filtering.
+- **Authentication**: Test face recognition and liveness challenges in real time — with a **live OpenCV camera preview** that pops up automatically.
+- **Enrollment**: Register new faces via a guided 5-pose wizard — with a **live OpenCV camera preview** showing your face position and detection status.
+- **Device Manager**: Enumerate V4L2 cameras, view capabilities, and hot-swap the active `/dev/video*` device.
+- **Settings**: Pull and hot-reload all daemon thresholds with field-level validation.
 
 ---
 

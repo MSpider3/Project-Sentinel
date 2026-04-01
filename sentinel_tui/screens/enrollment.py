@@ -11,14 +11,14 @@ Steps:
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import Button, Input, Label
 
-from sentinel_tui.constants import IPC_ENROLL_TIMEOUT, ErrorCode
+from sentinel_tui.constants import IPC_ENROLL_TIMEOUT, ErrorCode, DEFAULT_SOCKET_PATH
 from sentinel_tui.services.ipc_client import SentinelIPCClient
 from sentinel_tui.widgets.progress_bar import PoseProgress
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 POSES = ["Center", "Left", "Right", "Up", "Down"]
 
 
-class EnrollmentScreen(Screen):
+class EnrollmentScreen(Container):
     """Wizard UI for face registration."""
 
     DEFAULT_CSS = """
@@ -86,6 +86,7 @@ class EnrollmentScreen(Screen):
         self._ipc = ipc
         self._username = ""
         self._pose_loop_active = False
+        self._preview_proc = None  # OpenCV preview subprocess
 
     def compose(self) -> ComposeResult:
         with Container(id="enroll-container"):
@@ -187,7 +188,8 @@ class EnrollmentScreen(Screen):
         self.run_worker(self._do_start_enrollment, thread=True)
 
     def _do_start_enrollment(self) -> None:
-        res = self._ipc.call("start_enrollment", {"username": self._username}, timeout=IPC_ENROLL_TIMEOUT)
+        # NOTE: daemon reads param as 'user_name', not 'username'
+        res = self._ipc.call("start_enrollment", {"user_name": self._username}, timeout=IPC_ENROLL_TIMEOUT)
         
         def _handle_start():
             if res.get("success"):
@@ -195,9 +197,12 @@ class EnrollmentScreen(Screen):
                 self.query_one("#pose-progress", PoseProgress).current_step = 0
                 self._pose_loop_active = True
                 self.set_interval(0.3, self._poll_frame)
+                # Launch live OpenCV preview window
+                self._launch_preview()
             else:
+                error_msg = res.get("error", res.get("message", ""))
                 code = res.get("error_code", "UNKNOWN")
-                desc = ErrorCode.describe(code)
+                desc = error_msg if error_msg else ErrorCode.describe(code)
                 self.notify(f"Cannot start: {desc}", severity="error")
                 self._show_step(1)
         
@@ -277,12 +282,48 @@ class EnrollmentScreen(Screen):
 
     def _abort_enrollment(self) -> None:
         self._pose_loop_active = False
+        self._kill_preview()
         self.notify("Canceling enrollment...")
         self.run_worker(lambda: self._ipc.call("stop_enrollment"), thread=True)
         self._show_step(1)
         self.app.action_show_screen("dashboard")
 
+    def _launch_preview(self) -> None:
+        """Launch frame_preview as a detached module (works from any cwd)."""
+        try:
+            self._kill_preview()
+            self._preview_proc = subprocess.Popen(
+                ["uv", "run", "python", "-m",
+                 "sentinel_tui.scripts.frame_preview",
+                 "--mode", "enroll",
+                 "--socket", DEFAULT_SOCKET_PATH],
+                start_new_session=True
+            )
+        except Exception as e:
+            logger.warning(f"Could not launch frame preview: {e}")
+
+    def _kill_preview(self) -> None:
+        """Terminate the preview subprocess if running."""
+        if self._preview_proc and self._preview_proc.poll() is None:
+            try:
+                self._preview_proc.terminate()
+            except Exception:
+                pass
+        self._preview_proc = None
+
     def on_unmount(self) -> None:
-        """Clean up RPC state if user navigates away mid-wizard."""
-        if self._pose_loop_active:
-            self._abort_enrollment()
+        """Clean up resources when screen is destroyed.
+
+        IMPORTANT: Do NOT call _abort_enrollment() here — that calls
+        action_show_screen() which triggers navigation during screen
+        destruction and causes a double-unmount / layout crash.
+        Instead, we fire the stop IPC call directly and clean up state.
+        """
+        self._pose_loop_active = False
+        self._kill_preview()
+        if self.current_mode_was_active():
+            self.run_worker(lambda: self._ipc.call("stop_enrollment"), thread=True)
+
+    def current_mode_was_active(self) -> bool:
+        """Check if enrollment was in progress without querying DOM (safe from on_unmount)."""
+        return self._username != ""

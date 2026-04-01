@@ -11,7 +11,6 @@ import logging
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import Button, Label, ListItem, ListView, Static
 
 from sentinel_tui.constants import IPC_PREVIEW_TIMEOUT, ErrorCode
@@ -65,12 +64,12 @@ class DeviceCard(ListItem):
             yield Label(f"/dev/video{self.device_index}", classes="dev-index")
             yield Label(self._name_str, classes="dev-name")
             if self._is_active:
-                yield Label("ACTIVE", classes="dev-status", style="color: #00ff88;")
+                yield Label("ACTIVE", classes="dev-status active-highlight")
 
         yield Label(f"Caps: {self._caps_str}", classes="dev-caps")
 
 
-class DevicesScreen(Screen):
+class DevicesScreen(Container):
     """
     Hardware diagnostic screen.
     Queries daemon for v4l2 devices.
@@ -133,7 +132,7 @@ class DevicesScreen(Screen):
 
     def _do_scan(self) -> None:
         res = self._ipc.call("get_devices", timeout=IPC_PREVIEW_TIMEOUT)
-        self.call_from_thread(self._populate, res)
+        self.app.call_from_thread(self._populate, res)
 
     def _populate(self, result: dict) -> None:
         self.query_one("#dev-loading", Label).styles.display = "none"

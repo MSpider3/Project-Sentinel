@@ -45,24 +45,41 @@ LOG_VIEWER_MAX_LINES = 500   # max lines in LogViewer buffer (FIFO)
 
 
 def _resolve_log_file() -> str:
-    """Determine log file path with write-access fallback."""
-    default_dir = os.environ.get("SENTINEL_LOG_DIR", "/var/log/sentinel")
-    candidates = [
-        default_dir,
-        os.path.join(os.path.expanduser("~"), ".cache", "sentinel"),
-        "/tmp",
-    ]
-    for d in candidates:
-        try:
-            os.makedirs(d, exist_ok=True)
-            # Test writability
-            probe = os.path.join(d, ".probe_tui")
-            with open(probe, "w") as f:
-                f.write("ok")
-            os.unlink(probe)
-            return os.path.join(d, "sentinel.log")
-        except Exception:
-            continue
+    """
+    Determine the log file path to tail in the LogViewer.
+
+    Priority:
+      1. /var/log/sentinel/sentinel.log — preferred (written by daemon's sentinel_logger)
+         Readable if setup.sh ran with correct group permissions.
+      2. ~/.cache/sentinel/sentinel.log — user-space fallback (only if writable)
+      3. /tmp/sentinel.log — last resort
+
+    IMPORTANT: We do NOT create directories as a side effect here.
+    We only verify readability (for existing files) or writability (for fallback dirs).
+    """
+    system_log = os.path.join(
+        os.environ.get("SENTINEL_LOG_DIR", "/var/log/sentinel"),
+        "sentinel.log"
+    )
+
+    # Preferred: system log (root-written, group-readable after setup.sh)
+    if os.path.exists(system_log) and os.access(system_log, os.R_OK):
+        return system_log
+
+    # Fallback: user cache dir — only if it already exists OR we can create it
+    user_cache_log = os.path.join(os.path.expanduser("~"), ".cache", "sentinel", "sentinel.log")
+    user_cache_dir = os.path.dirname(user_cache_log)
+    try:
+        os.makedirs(user_cache_dir, exist_ok=True)
+        # Verify we can write (needed for the logger to create the file)
+        probe = os.path.join(user_cache_dir, ".probe_tui")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.unlink(probe)
+        return user_cache_log
+    except OSError:
+        pass
+
     return "/tmp/sentinel.log"
 
 

@@ -7,14 +7,13 @@ from __future__ import annotations
 import json
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import Button, Input, Label, RichLog
 
 from sentinel_tui.constants import IPC_READ_TIMEOUT
 from sentinel_tui.services.ipc_client import SentinelIPCClient
 
 
-class DiagnosticsScreen(Screen):
+class DiagnosticsScreen(Container):
     """
     Direct IPC command invoker for debugging and raw JSON interaction.
     """

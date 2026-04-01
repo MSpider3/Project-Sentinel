@@ -54,6 +54,9 @@ info "Removing desktop shortcut..."
 rm -f /usr/share/applications/sentinel-ui.desktop
 update-desktop-database /usr/share/applications/ 2>/dev/null || true
 
+info "Removing SELinux camera policy module (if installed)..."
+semodule -r sentinel-cam 2>/dev/null || true
+
 info "Removing log directory..."
 rm -rf /var/log/sentinel
 

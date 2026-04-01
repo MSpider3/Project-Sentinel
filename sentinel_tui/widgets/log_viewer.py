@@ -117,12 +117,30 @@ class LogViewer(Widget):
     def _initial_read(self) -> None:
         """Read the last ~100 lines for immediate context."""
         try:
+            if not os.path.exists(self._log_file_path):
+                raise FileNotFoundError(self._log_file_path)
             with open(self._log_file_path, "r", encoding="utf-8") as f:
-                # Naive tail implementation for small files (good enough for dev)
+                # Naive tail implementation for small files
                 lines = f.readlines()[-100:]
                 self._file_offset = f.tell()
+                if not lines:
+                    raise ValueError("empty")
                 for line in lines:
                     self._process_line(line.strip())
+        except (FileNotFoundError, PermissionError, ValueError) as exc:
+            # Show a helpful message instead of silent blank panel
+            try:
+                rl = self.query_one("#log-display", RichLog)
+                is_missing = isinstance(exc, (FileNotFoundError, ValueError))
+                if isinstance(exc, PermissionError):
+                    rl.write(f"[bold red]✗ Permission denied:[/bold red] {self._log_file_path}")
+                    rl.write("[dim]Run:[/dim] [cyan]sudo chmod g+r /var/log/sentinel/sentinel.log[/cyan]")
+                else:
+                    rl.write(f"[bold yellow]⏳ Waiting for log file:[/bold yellow] {self._log_file_path}")
+                    rl.write("[dim]Daemon may still be starting. Logs appear automatically once the service writes its first entry.[/dim]")
+                    rl.write("[dim]If you just installed, run:[/dim] [cyan]sudo systemctl start sentinel-backend[/cyan]")
+            except Exception:
+                pass
         except Exception:
             pass
 

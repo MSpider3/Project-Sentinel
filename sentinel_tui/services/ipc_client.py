@@ -46,7 +46,7 @@ class SentinelIPCClient:
         self._socket_path   = socket_path
         self._debug         = debug
         self._sock: socket.socket | None = None
-        self._lock          = threading.Lock()
+        self._lock          = threading.RLock()  # RLock: allows _reconnect_with_backoff to release/re-acquire safely
         self._request_id    = 0
         self._connected     = False
         self._retry_count   = 0
@@ -193,10 +193,19 @@ class SentinelIPCClient:
                     logger.debug(f"IPC ← {raw.strip()}")
 
                 response = json.loads(raw)
-                result = response.get("result", {})
 
-                # Check for protocol mismatch in the future
-                # (daemon may add protocol_version to responses later)
+                # Check if daemon returned a JSON-RPC error (e.g. Method not found)
+                if "error" in response:
+                    rpc_err = response["error"]
+                    code = rpc_err.get("code", -1)
+                    msg = rpc_err.get("message", "Unknown RPC error")
+                    logger.warning(f"IPC RPC error from daemon on '{method}': [{code}] {msg}")
+                    # -32601 = Method not found (daemon version mismatch)
+                    if code == -32601:
+                        return self._err(ErrorCode.UNKNOWN, f"Daemon does not support '{method}'. Run sync_patch.sh to update it.")
+                    return self._err(ErrorCode.UNKNOWN, msg)
+
+                result = response.get("result", {})
 
                 return result if isinstance(result, dict) else {"success": True, "value": result}
 

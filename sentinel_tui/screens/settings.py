@@ -8,8 +8,7 @@ import logging
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.containers import Container, Grid, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Label, Static
 from textual.message import Message
 
@@ -101,7 +100,7 @@ class FormField(Vertical):
         self.post_message(self.Changed(self.field_id, valid))
 
 
-class SettingsScreen(Screen):
+class SettingsScreen(Container):
     """
     Form-based configuration editor reading and writing to the daemon over IPC.
     """
@@ -199,7 +198,7 @@ class SettingsScreen(Screen):
 
     def _do_fetch_config(self) -> None:
         res = self._ipc.call("get_config", timeout=IPC_READ_TIMEOUT)
-        self.call_from_thread(self._populate_form, res)
+        self.app.call_from_thread(self._populate_form, res)
 
     def _populate_form(self, result: dict) -> None:
         if not result.get("success"):
@@ -287,7 +286,7 @@ class SettingsScreen(Screen):
 
     def _do_save(self, payload: dict) -> None:
         res = self._ipc.call("update_config", {"config": payload}, timeout=IPC_READ_TIMEOUT)
-        self.call_from_thread(self._save_complete, res)
+        self.app.call_from_thread(self._save_complete, res)
         
     def _save_complete(self, result: dict) -> None:
         if result.get("success"):
@@ -298,7 +297,7 @@ class SettingsScreen(Screen):
 
     def _do_reset_config(self) -> None:
         res = self._ipc.call("reset_config", timeout=IPC_READ_TIMEOUT)
-        self.call_from_thread(self._reset_complete, res)
+        self.app.call_from_thread(self._reset_complete, res)
         
     def _reset_complete(self, result: dict) -> None:
         if result.get("success"):

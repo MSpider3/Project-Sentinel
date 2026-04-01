@@ -1,4 +1,4 @@
-.PHONY: install install-dev run dev run-dev preview test test-cov lint format lock upgrade clean help
+.PHONY: install install-dev run dev run-dev run-debug preview preview-auth preview-enroll deploy test test-cov lint format lock upgrade clean help
 
 # ── Default ────────────────────────────────────────────────────────
 .DEFAULT_GOAL := help
@@ -9,27 +9,30 @@ help:
 	@echo "  ==========================================="
 	@echo ""
 	@echo "  Setup:"
-	@echo "    make install      Install production dependencies (uv sync)"
-	@echo "    make install-dev  Install + dev dependencies (pytest, ruff, textual-dev)"
+	@echo "    make install       Install production dependencies (uv sync)"
+	@echo "    make install-dev   Install + dev dependencies (pytest, ruff, textual-dev)"
+	@echo "    make deploy        Push updated core/ files to live daemon (no full reinstall)"
 	@echo ""
 	@echo "  Run:"
-	@echo "    make run          Run TUI using production socket"
-	@echo "    make run-dev      Run TUI with test socket + debug mode"
-	@echo "    make dev          Run with Textual dev tools (CSS live-reload, DOM inspector)"
-	@echo "    make preview      Launch standalone OpenCV camera preview window"
+	@echo "    make run           Run TUI using production socket"
+	@echo "    make run-debug     Run TUI with test socket + debug mode"
+	@echo "    make dev           Run with Textual dev tools (CSS live-reload, DOM inspector)"
+	@echo "    make preview       Launch standalone OpenCV camera preview window"
+	@echo "    make preview-auth  Launch auth frame preview (use during active auth test)"
+	@echo "    make preview-enroll Launch enroll frame preview (use during active enroll)"
 	@echo ""
 	@echo "  Quality:"
-	@echo "    make test         Run all tests"
-	@echo "    make test-cov     Run tests with coverage report"
-	@echo "    make lint         Lint with ruff"
-	@echo "    make format       Format with ruff"
+	@echo "    make test          Run all tests"
+	@echo "    make test-cov      Run tests with coverage"
+	@echo "    make lint          Lint with ruff"
+	@echo "    make format        Format with ruff"
 	@echo ""
 	@echo "  Dependencies:"
-	@echo "    make lock         Regenerate uv.lock from pyproject.toml"
-	@echo "    make upgrade      Upgrade all deps and regenerate lock file"
+	@echo "    make lock          Regenerate uv.lock from pyproject.toml"
+	@echo "    make upgrade       Upgrade all deps and regenerate lock file"
 	@echo ""
 	@echo "  Misc:"
-	@echo "    make clean        Remove all build/cache artifacts"
+	@echo "    make clean         Remove all build/cache artifacts"
 	@echo ""
 
 # ── Setup ──────────────────────────────────────────────────────────
@@ -41,21 +44,40 @@ install-dev:
 
 # ── Run ────────────────────────────────────────────────────────────
 run:
-	uv run sentinel-tui
+	uv run sentinel_tui
 
 dev:
 	uv run textual run --dev sentinel_tui.app:SentinelApp
 
 # Dev mode: test socket + debug flag
-run-dev:
-	uv run sentinel-tui --socket /tmp/sentinel_test.sock --debug
+run-debug:
+	uv run sentinel_tui --socket /tmp/sentinel_test.sock --debug
 
 # ── Camera Preview ─────────────────────────────────────────────────
 preview:
-	uv run python sentinel-tui/scripts/camera_preview.py
+	uv run python sentinel_tui/scripts/camera_preview.py
 
-preview-dev:
-	uv run python sentinel-tui/scripts/camera_preview.py --socket /tmp/sentinel_test.sock
+preview-debug:
+	uv run python sentinel_tui/scripts/camera_preview.py --socket /tmp/sentinel_test.sock
+
+preview-auth:
+	uv run python sentinel_tui/scripts/frame_preview.py --mode auth
+
+preview-enroll:
+	uv run python sentinel_tui/scripts/frame_preview.py --mode enroll
+
+# ── Deploy (quick update without full reinstall) ────────────────────
+# Copies updated core/*.py and sentinel_tui/ to the live system installation.
+# Use this during development instead of re-running setup.sh.
+deploy:
+	@echo "Deploying updated files to live system (requires sudo)..."
+	sudo cp core/*.py /usr/lib/project-sentinel/
+	@SITE=$$(find /usr/lib/project-sentinel/venv -name site-packages -type d | head -1); \
+	 if [ -n "$$SITE" ]; then sudo cp core/*.py "$$SITE/"; echo "  → Core modules deployed to $$SITE"; \
+	 else echo "  ⚠ site-packages not found, only root path updated"; fi
+	sudo cp -r sentinel_tui/. /usr/lib/project-sentinel/sentinel_tui/
+	sudo systemctl restart sentinel-backend
+	@echo "Deploy complete. Daemon restarted."
 
 # ── Quality ────────────────────────────────────────────────────────
 test:

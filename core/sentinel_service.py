@@ -130,6 +130,7 @@ class SentinelService:
         self.camera = None
         self.current_mode = None
         self.lock = Lock()
+        self._start_time = time.time()  # Track daemon start time for uptime reporting
         
         # Enrollment state
         self.enroll_user = None
@@ -307,14 +308,15 @@ class SentinelService:
 
             return {
                 "success": True,
-                "state": str(state) if state else "UNKNOWN",
-                "message": str(message) if message else "",
+                "state": str(state) if state is not None else "UNKNOWN",
+                "message": str(message) if message is not None else "",
                 "face_box": safe_face_box,
                 "info": safe_info,
-                "frame": frame_b64 or ""
+                "frame": frame_b64 if frame_b64 is not None else ""
             }
         except Exception as e:
-            self.logger.error(f"Frame error: {e}")
+            import traceback
+            self.logger.error(f"Frame error traceback:\n{traceback.format_exc()}")
             return {"success": False, "error": str(e)}
 
     def stop_authentication(self, params):
@@ -476,7 +478,7 @@ class SentinelService:
                 "success": True, "completed": False,
                 "current_pose": self.enroll_current_pose,
                 "total_poses": len(self.enroll_poses),
-                "pose_info": pose, "status": status,
+                "pose_info": pose, "status": str(status) if status is not None else "ready",
                 "face_box": face_box, "frame": frame_b64
             }
         except Exception as e:
@@ -694,22 +696,28 @@ class SentinelService:
         try:
             status_summary = "healthy"
             models_state = "loaded" if self.warmed else ("loading" if self.init_in_progress else "not_loaded")
-            camera_state = "ok" if (self.camera and getattr(self.camera, 'running', False)) else "stopped"
-            
-            # Simple check if camera fails when it should be running
-            if camera_state == "stopped" and self.current_mode is not None:
-                status_summary = "degraded"
-                
+
+            # Camera state: 'idle' when no session (normal), 'ok' when session is active
+            # and camera is open, 'error' when session is active but camera failed.
+            if self.current_mode is not None:
+                camera_state = "ok" if (self.camera is not None and getattr(self.camera, 'running', False)) else "error"
+                if camera_state == "error":
+                    status_summary = "degraded"
+            else:
+                camera_state = "idle"
+
             cfg = self.config.config if self.config else None
             cfg_ver = cfg.getint("Meta", "config_version", fallback=1) if cfg else 1
-            
+
+            uptime = int(time.time() - self._start_time)
+
             return {
                 "success": True,
                 "status": status_summary,
                 "models": models_state,
                 "camera": camera_state,
                 "enrolled_users": len(self.get_enrolled_users({}).get("users", [])),
-                "uptime_seconds": 0, # Uptime could be tracked properly later
+                "uptime_seconds": uptime,
                 "config_version": cfg_ver
             }
         except Exception as e:

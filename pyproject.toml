@@ -10,6 +10,7 @@ dependencies = [
     "textual==0.86.0",
     "rich==13.7.0",
     "typing-extensions>=4.8.0",
+    "opencv-python>=4.8.0",
 ]
 
 [project.optional-dependencies]
@@ -29,9 +30,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sentinel_tui"]
-
-[tool.hatch.build]
-package-dir = {"sentinel_tui" = "sentinel-tui"}
 
 [tool.ruff]
 line-length = 120

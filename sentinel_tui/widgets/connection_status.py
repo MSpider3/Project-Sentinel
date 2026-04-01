@@ -58,7 +58,7 @@ class ConnectionStatus(Widget):
     def compose(self) -> ComposeResult:
         yield Label("●", classes="conn-dot conn-dot--connecting", id="conn-dot")
         yield Label("Connecting...", classes="conn-label", id="conn-label")
-        yield Label("", classes="conn-socket", id="conn-socket", markup=False)
+        yield Label("", classes="conn-socket", id="conn-socket")
 
     def on_mount(self) -> None:
         self.set_interval(CONNECTION_PING_INTERVAL, self._ping)
@@ -66,8 +66,9 @@ class ConnectionStatus(Widget):
     def set_socket_path(self, path: str) -> None:
         self._socket_path = path
         try:
-            # We set markup=False on the Label in compose(), so this is now safe for any path!
-            self.query_one("#conn-socket", Label).update(f"[{path}]")
+            # Safely escape the brackets and path so Rich doesn't treat them as a markup tag
+            safe_text = markup_escape(f"[{path}]")
+            self.query_one("#conn-socket", Label).update(safe_text)
         except Exception:
             pass
 
