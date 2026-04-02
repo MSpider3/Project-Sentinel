@@ -14,6 +14,7 @@ import datetime
 # Import our intelligent modules
 from spoof_detector import SpoofDetector
 from stability_tracker import KalmanStabilityTracker
+from instruction_manager import InstructionManager, InstructionType
 
 # Configure ONNX Runtime
 ort.set_default_logger_severity(3)
@@ -108,6 +109,11 @@ class BiometricConfig:
             'AdaptivePolicy': {
                 'adaptation_limit_per_day': '1',
                 'initial_adaptations_require_password': '3'
+            },
+            'Feedback': {
+                'audio_enabled': 'True',
+                'text_enabled': 'True',
+                'preview_enabled': 'True'
             }
         }
         
@@ -176,6 +182,10 @@ class BiometricConfig:
             self.INITIAL_ADAPTATIONS_REQUIRE_PASSWORD = self.config.getint('AdaptivePolicy', 'initial_adaptations_require_password')
             
             self.MIN_FACE_SIZE_PIXELS = self.config.getint('FaceDetection', 'min_face_size')
+            
+            self.AUDIO_ENABLED = self.config.getboolean('Feedback', 'audio_enabled', fallback=True)
+            self.TEXT_ENABLED = self.config.getboolean('Feedback', 'text_enabled', fallback=True)
+            self.PREVIEW_ENABLED = self.config.getboolean('Feedback', 'preview_enabled', fallback=True)
         except Exception as e:
             logger.error(f"Error parsing config: {e}. using fallbacks.")
             self.CAMERA_INDEX = 0
@@ -848,7 +858,7 @@ class SentinelAuthenticator:
     STATE_LOCKOUT = "LOCKOUT"
     STATE_2FA = "REQUIRE_2FA" # New State
     
-    def __init__(self, target_user=None, headless=False):
+    def __init__(self, target_user=None, headless=False, instruction_manager=None):
         self.config = BiometricConfig()
         self.processor = BiometricProcessor(self.config)
         self.store = FaceEmbeddingStore()
@@ -856,6 +866,13 @@ class SentinelAuthenticator:
         self.blacklist_manager = BlacklistManager()
         self.adaptive_manager = None # Lazy init per user
         self.headless = headless
+        self.instruction_manager = instruction_manager or InstructionManager()
+        self.instruction_manager.update_config(
+            preview_enabled=self.config.PREVIEW_ENABLED,
+            audio_enabled=self.config.AUDIO_ENABLED,
+            text_enabled=self.config.TEXT_ENABLED
+        )
+        self.last_instruction_type = None
         
         # Initialize audit logger here to avoid import-time stdout noise
         self.audit_log = setup_audit_logger()
@@ -865,21 +882,25 @@ class SentinelAuthenticator:
         self.state = self.STATE_WAITING
         self.message = "Initializing..."
         
+        self._init_session_state()
+        
+    def _send_instruction(self, inst_type):
+        if self.last_instruction_type != inst_type:
+            self.last_instruction_type = inst_type
+            self.message = self.instruction_manager.send_instruction(inst_type)
+        return self.message
+
+    def _init_session_state(self):
         # Target Locking
         self.locked_face_center = None
-        
         # Session Timing
         self.session_start_time = None
-        
         # Persistent Data
         self.matched_user = None
         self.last_distance = None
-        self.active_tier = None # 1=Golden, 2=Standard, 3=2FA, 4=Fail
-        
+        self.active_tier = None
         # Retry Logic
         self.retry_count = 0
-        
-        # Adaptation Luck (Roll 0-10, needs 7)
         self.adaptation_lucky_roll = np.random.randint(0, 11)
         
     def log_audit(self, status, message, extra=None):
@@ -907,25 +928,32 @@ class SentinelAuthenticator:
             self.audit_log.info(log_msg)
 
     def initialize(self):
+        if hasattr(self, 'logger') is False:
+            import logging
+            self.logger = logging.getLogger(self.__class__.__name__)
+            
         if not self.processor.initialize_models():
+            self.logger.error("Authentication init failed: initialize_models returned False.")
             return False
             
         galleries, _ = self.store.load_all_galleries()
         if self.target_user:
-            if self.target_user in galleries:
+            if self.target_user in galleries and len(galleries[self.target_user]) > 0:
                 self.galleries = {self.target_user: galleries[self.target_user]}
             else:
                 self.message = f"User {self.target_user} not enrolled."
+                self.logger.warning(f"Authentication init failed: {self.message}")
                 return False
         else:
             self.galleries = galleries
             
         if len(self.galleries) == 0:
             self.message = "No users enrolled."
+            self.logger.warning("Authentication init failed: No users enrolled in database.")
             return False
             
         self.session_start_time = time.time()
-        self.message = "Ready. Look at camera."
+        self.message = self._send_instruction(InstructionType.LOOK_AT_CAMERA)
         return True
         
     def _center_of(self, box):
@@ -972,7 +1000,8 @@ class SentinelAuthenticator:
                  if self.state != self.STATE_WAITING:
                      self.log_audit("RESET", "Face lost during session")
                  self._reset(full_reset=False)
-                 self.message = "Face lost. Resetting..."
+                 self.message = self._send_instruction(InstructionType.LOOK_AT_CAMERA)
+                 self.last_instruction_type = None # Reset so it triggers on next face
             return self.STATE_WAITING, self.message, None, debug_info
             
         self.locked_face_center = self._center_of(active_face)
@@ -991,7 +1020,8 @@ class SentinelAuthenticator:
                  return self.STATE_FAILURE, "Locked out: Spoof detected", smoothed, {}
              
              self._reset(full_reset=True)
-             self.message = f"Spoof/Fake detected. Attempts left: {remaining}"
+             self.message = self._send_instruction(InstructionType.AUTH_FAILED)
+             self.message = f"{self.message} (Spoof. Attempts left: {remaining})"
              return self.STATE_WAITING, self.message, smoothed, {}
              
         if self.state == self.STATE_WAITING:
@@ -1008,7 +1038,8 @@ class SentinelAuthenticator:
                      is_blocked, block_dist = self.blacklist_manager.check_blacklist(emb)
                      if is_blocked:
                          self.log_audit("BLOCKED", f"Intrusion matching blacklist (Dist: {block_dist:.3f})")
-                         return self.STATE_FAILURE, "Access Denied: Restricted Identity", smoothed, {}
+                         self.message = self._send_instruction(InstructionType.AUTH_FAILED)
+                         return self.STATE_FAILURE, self.message, smoothed, {}
                          
                      # 2. Identification
                      user, dist, _ = self.processor.identify_user_1n(emb, self.galleries)
@@ -1031,10 +1062,7 @@ class SentinelAuthenticator:
                          self.state = self.STATE_RECOGNIZED
                          self.matched_user = user
                          self.validator.start_session()
-                         if self.headless:
-                             self.validator.checklist["challenge"] = True # Skip directional nod for PAM
-                             self.validator.checklist["blink"] = True     # Skip blink for PAM
-                         self.message = f"Hi {user}! {self.validator.challenge_type}"
+                         # We enforce challenges and rely on InstructionManager for both Headless and TUI
                          self.log_audit("INFO", f"User recognized (Tier {tier}), starting challenges")
                          
                          # Check adaptive gallery too for better match?
@@ -1044,11 +1072,11 @@ class SentinelAuthenticator:
                          # Logic: If identified, proceed.
                      else:
                          # Tier 4: Unknown / Intrusion
-                         self.message = "Unknown User"
+                         self.message = self._send_instruction(InstructionType.AUTH_FAILED)
                          # Trigger IDS recording
                          self.blacklist_manager.add_intrusion(frame, emb)
                          self.log_audit("INTRUSION", "Unknown face added to blacklist")
-                         return self.STATE_FAILURE, "Access Denied", smoothed, {}
+                         return self.STATE_FAILURE, self.message, smoothed, {}
         
         elif self.state == self.STATE_RECOGNIZED:
             if self.validator.is_timed_out():
@@ -1061,7 +1089,8 @@ class SentinelAuthenticator:
                      return self.STATE_FAILURE, "Challenge Timeout. Locked out.", smoothed, {}
                 
                 self._reset(full_reset=True)
-                self.message = f"Too slow. Attempts left: {remaining}"
+                self.message = self._send_instruction(InstructionType.AUTH_FAILED)
+                self.message = f"{self.message} (Too slow. Attempts left: {remaining})"
                 return self.STATE_WAITING, self.message, smoothed, {}
             
             cx, cy = self._center_of(active_face)
@@ -1070,12 +1099,19 @@ class SentinelAuthenticator:
             if not self.validator.checklist['challenge']:
                 # STAGE 1: Head Pose Challenge
                 if self.validator.update_challenge_progress(active_face, nose):
-                    self.message = "Good! Now Blink."
+                    self.message = self._send_instruction(InstructionType.BLINK)
                 else:
-                    self.message = f"Hi {self.matched_user}! Turn Head {self.validator.challenge_type}"
+                    if self.validator.challenge_type == "LEFT":
+                        self.message = self._send_instruction(InstructionType.TURN_LEFT)
+                    elif self.validator.challenge_type == "RIGHT":
+                        self.message = self._send_instruction(InstructionType.TURN_RIGHT)
+                    elif self.validator.challenge_type == "UP":
+                        self.message = self._send_instruction(InstructionType.TURN_UP)
+                    elif self.validator.challenge_type == "DOWN":
+                        self.message = self._send_instruction(InstructionType.TURN_DOWN)
             else:
                 # STAGE 2: Blink Detection (Only after challenge is done)
-                self.message = "Please Blink..."
+                self.message = self._send_instruction(InstructionType.BLINK)
                 try:
                     blink, ear = self.processor.detect_blink(frame)
                     if blink:
@@ -1091,13 +1127,14 @@ class SentinelAuthenticator:
                 # Final Decision based on Tier
                 if self.active_tier == 3:
                     self.state = self.STATE_2FA
-                    self.message = f"2FA Required: {self.matched_user}"
+                    self.message = self._send_instruction(InstructionType.AUTH_REQUIRE_2FA)
                     self.log_audit("SUCCESS_2FA", "Biometrics passed, password required")
                     return self.state, self.message, smoothed, {'user': self.matched_user, 'dist': self.last_distance}
                 
                 else:
                     self.state = self.STATE_SUCCESS
-                    self.message = f"Access Granted: {self.matched_user}"
+                    msg = self._send_instruction(InstructionType.AUTH_SUCCESS_TIER1 if self.active_tier == 1 else InstructionType.AUTH_SUCCESS_TIER2)
+                    self.message = f"{msg} (User: {self.matched_user})"
                     self.log_audit("SUCCESS", "Access Granted")
                     
                     # Adaptation (Golden Zone only)

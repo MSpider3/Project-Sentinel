@@ -34,12 +34,14 @@ def main():
         
         # Capture GUI context for preview window
         display = os.environ.get('DISPLAY')
+        wayland_display = os.environ.get('WAYLAND_DISPLAY')
+        xdg_runtime = os.environ.get('XDG_RUNTIME_DIR')
         xauth = os.environ.get('XAUTHORITY')
         
         # If running via sudo/pam_exec, env is likely stripped. 
         # Attempt to find the user's active graphical session.
-        if not display:
-            display = ":0" # Most common local display
+        if not display and not wayland_display:
+            display = ":0" # Most common local display fallback
             
         if not xauth and user:
             # 1. Try common locations for .Xauthority based on username
@@ -48,6 +50,9 @@ def main():
                 home_dir = user_info.pw_dir
                 uid = user_info.pw_uid
                 
+                if not xdg_runtime:
+                     xdg_runtime = f"/run/user/{uid}"
+
                 # Check ~/.Xauthority
                 potential_xauth = os.path.join(home_dir, ".Xauthority")
                 if os.path.exists(potential_xauth):
@@ -55,9 +60,8 @@ def main():
                 
                 # 2. Check Fedora-style GNOME path (/run/user/1000/xauth_...)
                 else:
-                    run_dir = f"/run/user/{uid}"
-                    if os.path.exists(run_dir):
-                        matches = glob.glob(os.path.join(run_dir, "xauth_*"))
+                    if os.path.exists(xdg_runtime):
+                        matches = glob.glob(os.path.join(xdg_runtime, "xauth_*"))
                         if matches:
                             xauth = matches[0]
             except Exception:
@@ -65,6 +69,8 @@ def main():
 
         gui_context = {
             "display": display,
+            "wayland_display": wayland_display,
+            "xdg_runtime_dir": xdg_runtime,
             "xauthority": xauth
         }
         

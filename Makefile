@@ -76,8 +76,26 @@ deploy:
 	 if [ -n "$$SITE" ]; then sudo cp core/*.py "$$SITE/"; echo "  → Core modules deployed to $$SITE"; \
 	 else echo "  ⚠ site-packages not found, only root path updated"; fi
 	sudo cp -r sentinel_tui/. /usr/lib/project-sentinel/sentinel_tui/
-	sudo systemctl restart sentinel-backend
-	@echo "Deploy complete. Daemon restarted."
+	@echo "  → Syncing gallery files to deployed models dir..."
+	@sudo mkdir -p /usr/lib/project-sentinel/models
+	@if ls models/gallery_*.npy 1>/dev/null 2>&1; then \
+		sudo cp models/gallery_*.npy /usr/lib/project-sentinel/models/; \
+		echo "  → Gallery files deployed: $$(ls models/gallery_*.npy | xargs -n1 basename | tr '\\n' ' ')"; \
+	else \
+		echo "  ⚠ No gallery_*.npy files found in models/ — user may not be enrolled"; \
+	fi
+	@echo "  → Syncing PAM C source to deployed archive dir..."
+	@sudo mkdir -p /usr/lib/project-sentinel/archive
+	@sudo cp archive/pam_sentinel.c /usr/lib/project-sentinel/archive/
+	@for svc in sentinel-daemon sentinel-backend sentinel; do \
+		if systemctl is-active --quiet $$svc 2>/dev/null; then \
+			echo "  → Restarting $$svc..."; \
+			sudo systemctl restart $$svc; \
+			break; \
+		fi; \
+	done
+	@echo "Deploy complete."
+
 
 # ── Quality ────────────────────────────────────────────────────────
 test:

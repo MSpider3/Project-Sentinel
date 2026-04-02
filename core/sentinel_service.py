@@ -56,14 +56,7 @@ import subprocess
 
 _log.info("stdlib imports OK")
 
-# ── STEP 2: Third-party imports (these can fail if pip install missed packages) ─
-try:
-    import pam
-    _log.info("pam imported OK")
-except ImportError as e:
-    _log.critical(f"FATAL: 'pam' module not found — {e}. Install python-pam in the venv.")
-    sys.exit(1)
-
+# ── STEP 2: Dependencies ───────────────────────────────────────────────────────
 from threading import Thread, Lock, Event
 
 # ── STEP 3: Quiet C++ library noise ───────────────────────────────────────────
@@ -243,7 +236,15 @@ class SentinelService:
             if target_user and self.store.check_expiry(target_user, max_days=45):
                  return {"success": False, "error": "BIOMETRICS_EXPIRED"}
             
-            self.authenticator = SentinelAuthenticator(target_user=target_user)
+            try:
+                from instruction_manager import InstructionManager
+                if not hasattr(self, 'instruction_manager') or not self.instruction_manager:
+                    self.instruction_manager = InstructionManager()
+                self.authenticator = SentinelAuthenticator(target_user=target_user, instruction_manager=self.instruction_manager)
+            except Exception as e:
+                self.logger.warning(f"Failed to init InstructionManager for TUI: {e}")
+                self.authenticator = SentinelAuthenticator(target_user=target_user)
+                
             if not self.authenticator.initialize():
                 return {"success": False, "error": self.authenticator.message}
             
@@ -267,7 +268,7 @@ class SentinelService:
             return {"success": False, "error": str(e)}
 
     def process_auth_frame(self, params):
-        if self.current_mode != 'auth' or not self.camera or not self.authenticator:
+        if self.current_mode not in ('auth', 'pam_auth') or not self.camera or not self.authenticator:
             return {"success": False, "error": "Authentication not started"}
         
         try:
@@ -331,116 +332,215 @@ class SentinelService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _discover_gui_context(self, target_user=None):
+        """Attempts to find the active GUI session on the local machine (seat0) using loginctl."""
+        context = {}
+        try:
+            import subprocess
+            result = subprocess.run(["loginctl", "list-sessions", "--no-legend"], capture_output=True, text=True)
+            for line in result.stdout.strip().split('\n'):
+                if not line: continue
+                parts = line.split()
+                if len(parts) < 3: continue
+                session_id = parts[0]
+                uid = parts[1]
+                user = parts[2]
+                seat = parts[3] if len(parts) > 3 else ""
+                
+                if seat == "seat0":
+                    prop_res = subprocess.run(["loginctl", "show-session", session_id, "-p", "Display", "-p", "WaylandDisplay", "-p", "Remote", "-p", "State"], capture_output=True, text=True)
+                    props = dict([l.split('=', 1) for l in prop_res.stdout.strip().split('\n') if '=' in l])
+                    
+                    if props.get("Remote") == "yes":
+                        continue
+                        
+                    wayland = props.get("WaylandDisplay")
+                    display = props.get("Display")
+                    state = props.get("State")
+                    
+                    # We want the active session if possible, or any session with a display if target_user matches, 
+                    # but since this is for local hardware we just take the active seat0 session.
+                    if state == "active" and (wayland or display):
+                        context['xdg_runtime_dir'] = f"/run/user/{uid}"
+                        if wayland: context['wayland_display'] = wayland
+                        if display: context['display'] = display
+                        # Standard path, might differ slightly for GDM but works for most desktop environments
+                        context['xauthority'] = f"/run/user/{uid}/gdm/Xauthority"
+                        self.logger.info(f"PAM: Discovered Active GUI on seat0 for user {user} at {uid} (Wayland={wayland}, Display={display})")
+                        break
+        except Exception as e:
+            self.logger.debug(f"PAM: GUI discovery failed: {e}")
+        return context
+
     # --- HEADLESS PAM AUTHENTICATION ---
     def authenticate_pam(self, params):
         """
-        Headless authentication for GDM/Lockscreen.
-        Runs its own loop for up to 5 seconds. Returns SUCCESS/FAILURE immediately.
+        Headless PAM authentication: reuses the daemon's already-warmed models.
+        Runs a camera+recognition loop for up to 11s, streams frames to the
+        shared frame buffer so process_auth_frame can serve the preview window
+        in parallel (the daemon is threaded per-client).
         """
         target_user = params.get('user')
         self.logger.info(f"PAM: Authentication request for user '{target_user}'")
         
-        # Ensure warmed up
-        if not self.processor: 
-            self.initialize({})
-            
-        try:
-            # Setup Authenticator in headless mode (disables directional nodding requirements)
-            auth = SentinelAuthenticator(target_user=target_user, headless=True)
-            if not auth.initialize():
-                self.logger.warning("PAM: Authenticator init failed")
+        # ── Ensure models are warmed (daemon init already does this at startup) ──
+        if not self.warmed or not self.processor:
+            self.logger.info("PAM: Daemon not yet warmed, triggering init...")
+            result = self.initialize({})
+            if not result.get('success'):
+                self.logger.error(f"PAM: Daemon warmup failed: {result.get('error')}")
                 return {"success": True, "result": "ERROR"}
 
-            # Launch Preview window if we have a display
+        try:
+            # ── Discover GUI/display context ──
             gui_context = params.get('gui_context', {})
-            display = gui_context.get('display')
-            xauth = gui_context.get('xauthority')
-            
-            preview_proc = None
-            if display:
-                try:
-                    # Root for all system-wide sentinel resources
-                    SENTINEL_ROOT = "/usr/lib/project-sentinel"
-                    
-                    # Use fixed absolute path to avoid venv/site-packages confusion
-                    python_bin = os.path.join(SENTINEL_ROOT, "venv", "bin", "python3")
-                    if not os.path.exists(python_bin):
-                         python_bin = sys.executable # Fallback
-                         
-                    preview_script = os.path.join(SENTINEL_ROOT, "sentinel_tui", "scripts", "frame_preview.py")
-                    
-                    if os.path.exists(preview_script):
-                         self.logger.info(f"PAM: Launching preview window on {display}")
-                         env = os.environ.copy()
-                         env['DISPLAY'] = display
-                         if xauth: env['XAUTHORITY'] = xauth
-                         env['PYTHONPATH'] = SENTINEL_ROOT
-                         
-                         # Redirect stdout/stderr to a dedicated log for debugging GUI issues
-                         # Permission note: daemon runs as root, so it can write to /var/log/sentinel/
-                         log_path = "/var/log/sentinel/preview.log"
-                         with open(log_path, "a") as log_file:
-                             log_file.write(f"\n--- Starting preview session: {time.ctime()} ---\n")
-                             log_file.flush()
-                             
-                             preview_proc = subprocess.Popen(
-                                 [python_bin, preview_script, "--socket", "/run/sentinel/sentinel.sock"],
-                                 env=env, stderr=log_file, stdout=log_file,
-                                 # Ensure we don't block the daemon if the window sits there
-                             )
-                    else:
-                         self.logger.warning(f"PAM: Preview script NOT FOUND at {preview_script}")
-                except Exception as pe:
-                    self.logger.warning(f"PAM: Failed to launch preview subprocess: {pe}")
+            if not gui_context.get('wayland_display') and not gui_context.get('display'):
+                gui_context.update(self._discover_gui_context(target_user))
 
-            # Start Camera (Short-lived)
-            width = self.config.config.getint('Camera', 'width', fallback=640)
-            height = self.config.config.getint('Camera', 'height', fallback=480)
-            
+            display       = gui_context.get('display')
+            wayland_display = gui_context.get('wayland_display')
+            xdg_runtime   = gui_context.get('xdg_runtime_dir')
+            xauth         = gui_context.get('xauthority')
+            can_preview   = bool(display or wayland_display)
+
+            self.logger.info(f"PAM: GUI context → display={display} wayland={wayland_display} xdg={xdg_runtime}")
+
+            # ── Build a SentinelAuthenticator that REUSES already-loaded models ──
+            # CRITICAL: Do NOT call SentinelAuthenticator.initialize() because that
+            # re-runs initialize_models() from scratch. Instead, share the daemon's
+            # already-warm BiometricProcessor and load galleries directly.
+            try:
+                from instruction_manager import InstructionManager
+                if not hasattr(self, 'instruction_manager') or not self.instruction_manager:
+                    self.instruction_manager = InstructionManager()
+                auth = SentinelAuthenticator(
+                    target_user=target_user, headless=True,
+                    instruction_manager=self.instruction_manager
+                )
+            except Exception as e:
+                self.logger.warning(f"PAM: InstructionManager init failed (non-fatal): {e}")
+                auth = SentinelAuthenticator(target_user=target_user, headless=True)
+
+            # Inject daemon's already-warm processor ─ skips re-loading models
+            auth.processor = self.processor
+
+            # Load galleries (fast — just reads .npy files)
+            galleries, _ = self.store.load_all_galleries()
+            self.logger.info(f"PAM: Galleries found: {list(galleries.keys())}")
+            if not galleries:
+                self.logger.error("PAM: No enrolled users found in gallery")
+                return {"success": True, "result": "ERROR"}
+
+            if target_user:
+                if target_user in galleries:
+                    auth.galleries = {target_user: galleries[target_user]}
+                else:
+                    self.logger.warning(f"PAM: User '{target_user}' not enrolled. Available: {list(galleries.keys())}")
+                    return {"success": True, "result": "ERROR"}
+            else:
+                auth.galleries = galleries
+
+            auth.session_start_time = time.time()
+
+            # ── Launch preview subprocess (as session user for Wayland access) ──
+            preview_proc = None
+            if can_preview:
+                try:
+                    SENTINEL_ROOT = "/usr/lib/project-sentinel"
+                    python_bin    = os.path.join(SENTINEL_ROOT, "venv", "bin", "python3")
+                    if not os.path.exists(python_bin):
+                        python_bin = sys.executable
+                    preview_script = os.path.join(SENTINEL_ROOT, "sentinel_tui", "scripts", "frame_preview.py")
+
+                    if os.path.exists(preview_script):
+                        env = {
+                            'PYTHONPATH':        SENTINEL_ROOT,
+                            'HOME':              f"/home/{target_user}" if target_user else "/root",
+                            'PATH':              "/usr/local/bin:/usr/bin:/bin",
+                        }
+                        if display:         env['DISPLAY']         = display
+                        if wayland_display: env['WAYLAND_DISPLAY'] = wayland_display
+                        if xdg_runtime:     env['XDG_RUNTIME_DIR'] = xdg_runtime
+                        if xauth:           env['XAUTHORITY']      = xauth
+
+                        cmd_args = [python_bin, preview_script, "--mode", "auth",
+                                    "--socket", DEFAULT_SOCKET_PATH]
+                        if target_user:
+                            cmd_args = ["runuser", "-u", target_user, "--"] + cmd_args
+
+                        log_path = "/var/log/sentinel/preview.log"
+                        try:
+                            log_file = open(log_path, "a")
+                            log_file.write(f"\n--- PAM preview: {time.ctime()} | user={target_user} ---\n")
+                            log_file.write(f"    cmd: {' '.join(cmd_args)}\n")
+                            log_file.write(f"    env: {env}\n")
+                            log_file.flush()
+                            preview_proc = subprocess.Popen(cmd_args, env=env,
+                                                            stdout=log_file, stderr=log_file)
+                        except OSError as le:
+                            self.logger.warning(f"PAM: Preview log open failed: {le}")
+                            preview_proc = subprocess.Popen(cmd_args, env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self.logger.info(f"PAM: Preview launched pid={preview_proc.pid if preview_proc else 'N/A'}")
+                    else:
+                        self.logger.warning(f"PAM: Preview script not found: {preview_script}")
+                except Exception as pe:
+                    self.logger.warning(f"PAM: Preview launch failed: {pe}", exc_info=True)
+
+            # ── Open camera and run recognition loop ──
+            width   = self.config.config.getint('Camera', 'width',  fallback=640)
+            height  = self.config.config.getint('Camera', 'height', fallback=480)
+
             cam = CameraStream(src=self.config.CAMERA_INDEX, width=width, height=height, fps=15).start()
-            
-            # Allow camera to warmup slightly
-            time.sleep(0.5)
-            
+            time.sleep(0.5)  # allow camera warmup
+
+            # Share camera + authenticator state with process_auth_frame for preview
+            with self.lock:
+                self.camera       = cam
+                self.authenticator = auth
+                self.current_mode = 'pam_auth'
+
             start_time = time.time()
-            timeout = 11.0 # Bumping to 11s for better headless UX
-            status = "FAILED"
-            
-            while time.time() - start_time < timeout:
-                frame = cam.read()
-                if frame is None:
-                    time.sleep(0.05)
-                    continue
-                
-                # Process logic
-                state, msg, _, info = auth.process_frame(frame)
-                dist = info.get('dist', 1.0) if info else 1.0
-                
-                # In headless PAM mode, we treat Tier 3 (Dist < 0.50) as success 
-                # because we don't handle the interactive password prompt here.
-                # States: SUCCESS, REQUIRE_2FA, STATE_2FA
-                if state in ["SUCCESS", "REQUIRE_2FA", "STATE_2FA"]:
-                    self.logger.info(f"PAM: SUCCESS for {target_user} (Dist: {dist:.3f}, State: {state})")
-                    status = "SUCCESS"
-                    break
-                
-                # Continue if FAILURE/LOCKOUT/etc until timeout
-                time.sleep(0.03)
-                
+            timeout    = 11.0
+            status     = "FAILED"
+
+            try:
+                while time.time() - start_time < timeout:
+                    frame = cam.read()
+                    if frame is None:
+                        time.sleep(0.05)
+                        continue
+
+                    state, msg, _, info = auth.process_frame(frame)
+                    dist = info.get('dist', 1.0) if info else 1.0
+
+                    self.logger.debug(f"PAM frame: state={state} msg={msg} dist={dist:.3f}")
+
+                    if state in ("SUCCESS", "REQUIRE_2FA", "STATE_2FA"):
+                        self.logger.info(f"PAM: Face matched for '{target_user}' (dist={dist:.3f})")
+                        status = "SUCCESS"
+                        break
+
+                    time.sleep(0.03)
+            finally:
+                # Always clean up camera and shared state
+                with self.lock:
+                    self.camera       = None
+                    self.authenticator = None
+                    self.current_mode = None
+                cam.stop()
+
             if preview_proc:
-                self.logger.info("PAM: Terminating preview window...")
+                self.logger.info("PAM: Terminating preview...")
                 preview_proc.terminate()
-                try: 
-                    preview_proc.wait(timeout=1.0)
-                except: 
-                    preview_proc.kill()
-                
-            cam.stop()
-            self.logger.info(f"PAM: Finished with status {status}")
+                try:   preview_proc.wait(timeout=2.0)
+                except: preview_proc.kill()
+
+            self.logger.info(f"PAM: Result = {status}")
             return {"success": True, "result": status}
-            
+
         except Exception as e:
-            self.logger.error(f"PAM Error: {e}")
+            self.logger.error(f"PAM Error: {e}", exc_info=True)
             return {"success": True, "result": "ERROR"}
 
 

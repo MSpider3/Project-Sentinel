@@ -150,6 +150,7 @@ mkdir -p "$PROJECT_LIB"
 mkdir -p "$PROJECT_LIB/core"
 mkdir -p "$PROJECT_VAR"/{models,blacklist,gallery,adaptive,intrusions}
 mkdir -p "$PROJECT_ETC"
+mkdir -p "/var/log/sentinel"
 chmod 700 "$PROJECT_VAR"
 touch /var/log/sentinel/preview.log
 chmod 666 /var/log/sentinel/preview.log
@@ -252,9 +253,35 @@ success "Python environments ready."
 
 # ── Step 8: Global 'sentinel' Command ───────────────────────────────────────
 info "Installing global 'sentinel' command..."
-printf '#!/bin/bash\nexport SENTINEL_SOCKET_PATH=/run/sentinel/sentinel.sock\ncd /usr/lib/project-sentinel\n"%s" run sentinel-tui "$@"\n' "$UV_BIN" > /usr/bin/sentinel
+cat > /usr/bin/sentinel << EOF
+#!/bin/bash
+export SENTINEL_SOCKET_PATH=/run/sentinel/sentinel.sock
+cd /usr/lib/project-sentinel
+
+case "\$1" in
+    preview)
+        shift
+        "$UV_BIN" run python sentinel_tui/scripts/camera_preview.py "\$@"
+        ;;
+    auth-preview)
+        shift
+        "$UV_BIN" run python sentinel_tui/scripts/frame_preview.py --mode auth "\$@"
+        ;;
+    enroll-preview)
+        shift
+        "$UV_BIN" run python sentinel_tui/scripts/frame_preview.py --mode enroll "\$@"
+        ;;
+    daemon)
+        shift
+        "$UV_BIN" run python core/sentinel_service.py "\$@"
+        ;;
+    *)
+        "$UV_BIN" run sentinel-tui "\$@"
+        ;;
+esac
+EOF
 chmod +x /usr/bin/sentinel
-success "Global 'sentinel' command installed."
+success "Global 'sentinel' command installed (supports: preview, auth-preview, daemon)."
 
 # Client script for PAM
 cp core/sentinel_client.py /usr/bin/sentinel_client.py

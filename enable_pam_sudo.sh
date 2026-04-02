@@ -8,19 +8,41 @@ fi
 
 TARGET="/etc/pam.d/sudo"
 BACKUP="/etc/pam.d/sudo.sentinel.bak"
-SCRIPT_PATH="/usr/lib/project-sentinel/sentinel_client.py"
+PAM_SOURCE="/usr/lib/project-sentinel/archive/pam_sentinel.c"
 
-echo "Checking Sentinel client script..."
-if [ ! -f "$SCRIPT_PATH" ]; then
-    echo "ERROR: $SCRIPT_PATH not found. Did you run setup.sh or make deploy?"
+# If running from source directory, adjust path
+if [ -f "archive/pam_sentinel.c" ]; then
+    PAM_SOURCE="archive/pam_sentinel.c"
+fi
+
+echo "Compiling native Sentinel PAM module..."
+if [ ! -f "$PAM_SOURCE" ]; then
+    echo "ERROR: $PAM_SOURCE not found. Ensure the archive directory exists."
     exit 1
 fi
 
-# Ensure executable permissions
-chmod +x "$SCRIPT_PATH"
+# Detect PAM directory (Fedora uses /lib64, Ubuntu uses /lib/x86_64-linux-gnu or /lib)
+if [ -d "/lib64/security" ]; then
+    PAM_DIR="/lib64/security"
+elif [ -d "/lib/x86_64-linux-gnu/security" ]; then
+    PAM_DIR="/lib/x86_64-linux-gnu/security"
+else
+    PAM_DIR="/lib/security"
+fi
+
+echo "Targeting PAM directory: $PAM_DIR"
+if ! gcc -fPIC -shared "$PAM_SOURCE" -o /tmp/pam_sentinel.so -lpam; then
+    echo "ERROR: Failed to compile PAM module. Do you have gcc and pam-devel installed?"
+    exit 1
+fi
+
+cp /tmp/pam_sentinel.so "$PAM_DIR/"
+chmod 755 "$PAM_DIR/pam_sentinel.so"
+rm /tmp/pam_sentinel.so
+echo "Installed pam_sentinel.so to $PAM_DIR"
 
 # Check if already injected
-if grep -q "sentinel_client.py" "$TARGET"; then
+if grep -q "pam_sentinel.so" "$TARGET"; then
     echo "Sentinel is already configured in $TARGET."
     exit 0
 fi
@@ -31,7 +53,7 @@ cp "$TARGET" "$BACKUP"
 echo "Injecting face recognition module into $TARGET..."
 
 # We need to insert our rule exactly below the first line (usually #%PAM-1.0)
-PAM_LINE="auth       sufficient   pam_exec.so quiet stdout $SCRIPT_PATH"
+PAM_LINE="auth       sufficient   pam_sentinel.so"
 
 # Use awk to insert the line safely right after the first line
 awk -v rule="$PAM_LINE" 'NR==1{print; print rule; next}1' "$BACKUP" > /tmp/sudo.new
