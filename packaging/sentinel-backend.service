@@ -27,7 +27,7 @@ LogsDirectory=sentinel
 LogsDirectoryMode=0750
 
 WorkingDirectory=/usr/lib/project-sentinel
-ExecStart=/usr/lib/project-sentinel/venv/bin/sentinel-daemon
+ExecStart=/usr/lib/project-sentinel/.venv/bin/python3 -u /usr/lib/project-sentinel/sentinel_service.py
 
 # Restart logic
 Restart=on-failure

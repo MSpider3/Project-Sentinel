@@ -285,6 +285,97 @@ class SentinelService:
             
             state, message, face_box, info = self.authenticator.process_frame(frame)
             
+            # ──────────────────────────────────────────────────────────────────
+            # PROTOTYPE-STYLE VISUAL FEEDBACK: Draw face box with state coloring
+            # ──────────────────────────────────────────────────────────────────
+            if face_box is not None and len(face_box) >= 4:
+                try:
+                    x, y, w, h = [int(float(v)) for v in face_box[:4]]
+                    
+                    # ──────────────────────────────────────────────────────────
+                    # 1. COLOR-CODED BOX BY STATE (matching prototype)
+                    # ──────────────────────────────────────────────────────────
+                    # Map state to BGR color (OpenCV uses BGR not RGB)
+                    state_colors = {
+                        "SUCCESS": (0, 255, 0),           # Green
+                        "RECOGNIZED": (0, 255, 0),       # Green (challenged)
+                        "REQUIRE_2FA": (0, 165, 255),    # Orange
+                        "FAILURE": (0, 0, 255),          # Red
+                        "LOCKOUT": (0, 0, 255),          # Red
+                        "ERROR": (0, 0, 255),            # Red
+                        "WAITING": (0, 255, 255),        # Yellow
+                    }
+                    box_color = state_colors.get(str(state), (0, 255, 255))  # Default yellow
+                    
+                    # Main bounding box (thickness 2)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
+                    
+                    # ──────────────────────────────────────────────────────────
+                    # 2. CORNER ACCENT LINES (decorative, like prototype)
+                    # ──────────────────────────────────────────────────────────
+                    corner_len = max(15, min(w, h) // 8)  # Scale corners with box size
+                    corner_thickness = 2
+                    
+                    # Top-left corner
+                    cv2.line(frame, (x, y), (x + corner_len, y), box_color, corner_thickness)
+                    cv2.line(frame, (x, y), (x, y + corner_len), box_color, corner_thickness)
+                    
+                    # Top-right corner
+                    cv2.line(frame, (x + w, y), (x + w - corner_len, y), box_color, corner_thickness)
+                    cv2.line(frame, (x + w, y), (x + w, y + corner_len), box_color, corner_thickness)
+                    
+                    # Bottom-left corner
+                    cv2.line(frame, (x, y + h), (x + corner_len, y + h), box_color, corner_thickness)
+                    cv2.line(frame, (x, y + h), (x, y + h - corner_len), box_color, corner_thickness)
+                    
+                    # Bottom-right corner
+                    cv2.line(frame, (x + w, y + h), (x + w - corner_len, y + h), box_color, corner_thickness)
+                    cv2.line(frame, (x + w, y + h), (x + w, y + h - corner_len), box_color, corner_thickness)
+                    
+                    # ──────────────────────────────────────────────────────────
+                    # 3. CONFIDENCE PERCENTAGE BELOW BOX (like prototype)
+                    # ──────────────────────────────────────────────────────────
+                    if isinstance(info, dict):
+                        confidence = info.get('confidence', None)
+                        if confidence is not None:
+                            try:
+                                conf_value = float(confidence) if isinstance(confidence, (int, float)) else 0.0
+                                conf_text = f"{conf_value * 100:.1f}%"
+                                
+                                # Text position: below box, centered
+                                text_x = x + (w // 2)
+                                text_y = y + h + 25
+                                
+                                # Get text size for background box
+                                font = cv2.FONT_HERSHEY_SIMPLEX
+                                font_scale = 0.6
+                                font_thickness = 2
+                                text_size = cv2.getTextSize(conf_text, font, font_scale, font_thickness)
+                                text_width = text_size[0][0]
+                                text_height = text_size[0][1]
+                                
+                                # Draw semi-transparent background rectangle
+                                overlay = frame.copy()
+                                bg_x1 = text_x - (text_width // 2) - 5
+                                bg_y1 = text_y - text_height - 5
+                                bg_x2 = text_x + (text_width // 2) + 5
+                                bg_y2 = text_y + 5
+                                cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                                frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
+                                
+                                # Draw confidence text
+                                cv2.putText(frame, conf_text, (text_x - (text_width // 2), text_y),
+                                          font, font_scale, box_color, font_thickness)
+                            except Exception as e:
+                                self.logger.debug(f"Failed to draw confidence: {e}")
+                    
+                    # ──────────────────────────────────────────────────────────
+                    # 4. STATE TEXT LABEL ABOVE BOX removed in prototype-style preview
+                    # ──────────────────────────────────────────────────────────
+                
+                except Exception as e:
+                    self.logger.debug(f"Failed to draw enhanced face box: {e}")
+
             # Encode frame as base64 JPEG for preview
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_b64 = base64.b64encode(buffer).decode('utf-8')
@@ -333,43 +424,129 @@ class SentinelService:
             return {"success": False, "error": str(e)}
 
     def _discover_gui_context(self, target_user=None):
-        """Attempts to find the active GUI session on the local machine (seat0) using loginctl."""
+        """Attempts to find the active GUI session on the local machine (seat0) using loginctl.
+        
+        Hardened to handle:
+        - loginctl output format: SESSION UID USER SEAT CLASS TYPE TTY REMOTE IDLE
+        - Both Wayland and X11 sessions
+        - Missing/empty WaylandDisplay/Display properties
+        - DBUS_SESSION_BUS_ADDRESS discovery via /run/user/<uid>/bus
+        - xauth file discovery via /run/user/<uid>/gdm/Xauthority or ~/.Xauthority
+        """
+        import glob as _glob
+        import subprocess
         context = {}
         try:
-            import subprocess
-            result = subprocess.run(["loginctl", "list-sessions", "--no-legend"], capture_output=True, text=True)
+            result = subprocess.run(
+                ["loginctl", "list-sessions", "--no-legend"],
+                capture_output=True, text=True, timeout=5
+            )
+            # loginctl columns (--no-legend): SESSION UID USER SEAT CLASS TYPE TTY REMOTE IDLE
+            # Older systemd may have fewer columns. seat0 is always in column 3 (0-indexed).
+            best_session = None  # (session_id, uid, user, props)
+
             for line in result.stdout.strip().split('\n'):
-                if not line: continue
+                if not line.strip():
+                    continue
                 parts = line.split()
-                if len(parts) < 3: continue
+                if len(parts) < 4:
+                    continue
                 session_id = parts[0]
-                uid = parts[1]
-                user = parts[2]
-                seat = parts[3] if len(parts) > 3 else ""
-                
-                if seat == "seat0":
-                    prop_res = subprocess.run(["loginctl", "show-session", session_id, "-p", "Display", "-p", "WaylandDisplay", "-p", "Remote", "-p", "State"], capture_output=True, text=True)
-                    props = dict([l.split('=', 1) for l in prop_res.stdout.strip().split('\n') if '=' in l])
-                    
-                    if props.get("Remote") == "yes":
-                        continue
-                        
-                    wayland = props.get("WaylandDisplay")
-                    display = props.get("Display")
-                    state = props.get("State")
-                    
-                    # We want the active session if possible, or any session with a display if target_user matches, 
-                    # but since this is for local hardware we just take the active seat0 session.
-                    if state == "active" and (wayland or display):
-                        context['xdg_runtime_dir'] = f"/run/user/{uid}"
-                        if wayland: context['wayland_display'] = wayland
-                        if display: context['display'] = display
-                        # Standard path, might differ slightly for GDM but works for most desktop environments
-                        context['xauthority'] = f"/run/user/{uid}/gdm/Xauthority"
-                        self.logger.info(f"PAM: Discovered Active GUI on seat0 for user {user} at {uid} (Wayland={wayland}, Display={display})")
+                uid        = parts[1]
+                user       = parts[2]
+                seat       = parts[3]   # 'seat0' or '-'
+
+                if seat != "seat0":
+                    continue
+
+                # Query all useful properties in one shot
+                prop_res = subprocess.run(
+                    ["loginctl", "show-session", session_id,
+                     "-p", "Display",
+                     "-p", "WaylandDisplay",
+                     "-p", "Remote",
+                     "-p", "State",
+                     "-p", "Type"],
+                    capture_output=True, text=True, timeout=5
+                )
+                props = {}
+                for prop_line in prop_res.stdout.strip().split('\n'):
+                    if '=' in prop_line:
+                        k, v = prop_line.split('=', 1)
+                        props[k.strip()] = v.strip()
+
+                if props.get("Remote", "no") == "yes":
+                    continue
+
+                state   = props.get("State", "")
+                wayland = props.get("WaylandDisplay", "")
+                display = props.get("Display", "")
+                stype   = props.get("Type", "")
+
+                # Accept 'active' sessions first; fall through to 'online' if nothing better
+                has_display = bool(wayland or display)
+                if state == "active" and (has_display or stype in ("wayland", "x11", "mir")):
+                    best_session = (session_id, uid, user, props)
+                    break  # active seat0 session wins immediately
+                elif state in ("online", "opening") and has_display and best_session is None:
+                    best_session = (session_id, uid, user, props)
+
+            if best_session:
+                session_id, uid, user, props = best_session
+                wayland = props.get("WaylandDisplay", "")
+                display = props.get("Display", "")
+                xdg     = f"/run/user/{uid}"
+
+                # ── If WaylandDisplay is empty, try common fallbacks ──
+                if not wayland and os.path.exists(f"{xdg}/wayland-0"):
+                    wayland = "wayland-0"
+                if not wayland and os.path.exists(f"{xdg}/wayland-1"):
+                    wayland = "wayland-1"
+
+                # ── Xauthority: try several locations ──
+                xauth = ""
+                for xauth_candidate in [
+                    f"{xdg}/gdm/Xauthority",
+                    f"{xdg}/.Xauthority",
+                    f"/home/{user}/.Xauthority",
+                ]:
+                    if os.path.exists(xauth_candidate):
+                        xauth = xauth_candidate
                         break
+                # Also try glob for xauth_* files in xdg runtime
+                if not xauth:
+                    matches = _glob.glob(f"{xdg}/xauth_*")
+                    if matches:
+                        xauth = matches[0]
+
+                # ── DBUS: required for many Wayland compositors / GTK apps ──
+                dbus_addr = ""
+                dbus_socket = f"{xdg}/bus"
+                if os.path.exists(dbus_socket):
+                    dbus_addr = f"unix:path={dbus_socket}"
+
+                context['xdg_runtime_dir'] = xdg
+                if wayland:
+                    context['wayland_display'] = wayland
+                if display:
+                    context['display'] = display
+                if xauth:
+                    context['xauthority'] = xauth
+                if dbus_addr:
+                    context['dbus_session_bus_address'] = dbus_addr
+                context['uid'] = uid
+                context['user'] = user
+
+                self.logger.info(
+                    f"PAM: Discovered session {session_id} for user '{user}' (uid={uid}) "
+                    f"[Wayland={wayland or 'N/A'}, Display={display or 'N/A'}, "
+                    f"XDG={xdg}, DBUS={dbus_addr or 'N/A'}]"
+                )
+            else:
+                self.logger.warning("PAM: No active seat0 GUI session found via loginctl.")
+
         except Exception as e:
-            self.logger.debug(f"PAM: GUI discovery failed: {e}")
+            self.logger.warning(f"PAM: GUI discovery failed: {e}", exc_info=True)
         return context
 
     # --- HEADLESS PAM AUTHENTICATION ---
@@ -381,15 +558,17 @@ class SentinelService:
         in parallel (the daemon is threaded per-client).
         """
         target_user = params.get('user')
+        on_update = params.get('_on_update', None)
         self.logger.info(f"PAM: Authentication request for user '{target_user}'")
         
         # ── Ensure models are warmed (daemon init already does this at startup) ──
         if not self.warmed or not self.processor:
             self.logger.info("PAM: Daemon not yet warmed, triggering init...")
-            result = self.initialize({})
+            result = self.initialize({"timeout_sec": 30})
             if not result.get('success'):
-                self.logger.error(f"PAM: Daemon warmup failed: {result.get('error')}")
-                return {"success": True, "result": "ERROR"}
+                err_msg = result.get('error', 'Daemon warmup timed out')
+                self.logger.error(f"PAM: Daemon warmup failed: {err_msg}")
+                return {"success": True, "result": "FAILED", "error": f"Warmup Failed: {err_msg}"}
 
         try:
             # ── Discover GUI/display context ──
@@ -397,22 +576,36 @@ class SentinelService:
             if not gui_context.get('wayland_display') and not gui_context.get('display'):
                 gui_context.update(self._discover_gui_context(target_user))
 
-            display       = gui_context.get('display')
+            display         = gui_context.get('display')
             wayland_display = gui_context.get('wayland_display')
-            xdg_runtime   = gui_context.get('xdg_runtime_dir')
-            xauth         = gui_context.get('xauthority')
-            can_preview   = bool(display or wayland_display)
+            xdg_runtime     = gui_context.get('xdg_runtime_dir')
+            xauth           = gui_context.get('xauthority')
+            can_preview     = bool(display or wayland_display)
 
             self.logger.info(f"PAM: GUI context → display={display} wayland={wayland_display} xdg={xdg_runtime}")
 
             # ── Build a SentinelAuthenticator that REUSES already-loaded models ──
-            # CRITICAL: Do NOT call SentinelAuthenticator.initialize() because that
-            # re-runs initialize_models() from scratch. Instead, share the daemon's
-            # already-warm BiometricProcessor and load galleries directly.
             try:
                 from instruction_manager import InstructionManager
                 if not hasattr(self, 'instruction_manager') or not self.instruction_manager:
                     self.instruction_manager = InstructionManager()
+                # Inject target user so audio can route properly into the target user's PulseAudio/PipeWire session
+                self.instruction_manager.target_user = target_user
+                
+                if on_update:
+                    def instruction_hook(text_msg):
+                        if text_msg: on_update(text_msg)
+                    self.instruction_manager.on_text_generated = instruction_hook
+                    # Send an immediate informational update so PAM clients (sudo) get
+                    # feedback right away instead of waiting for the first instruction
+                    # from the recognition loop.
+                    try:
+                        on_update("Looking for face...")
+                    except Exception:
+                        self.logger.debug("PAM: initial on_update failed", exc_info=True)
+                else:
+                    self.instruction_manager.on_text_generated = None
+                
                 auth = SentinelAuthenticator(
                     target_user=target_user, headless=True,
                     instruction_manager=self.instruction_manager
@@ -421,22 +614,32 @@ class SentinelService:
                 self.logger.warning(f"PAM: InstructionManager init failed (non-fatal): {e}")
                 auth = SentinelAuthenticator(target_user=target_user, headless=True)
 
-            # Inject daemon's already-warm processor ─ skips re-loading models
             auth.processor = self.processor
 
-            # Load galleries (fast — just reads .npy files)
+            # ── Initialize the authenticator (loads models/galleries) ──
+            if not auth.initialize():
+                err_reason = getattr(auth, 'message', 'Initialization failed')
+                self.logger.error(f"PAM: Auth initialize failed: {err_reason}")
+                return {"success": True, "result": "FAILED", "error": f"Init Failed: {err_reason}"}
+
+            # ── Load galleries ──
+            # The galleries are already loaded within auth.initialize() but we re-fetch to log
             galleries, _ = self.store.load_all_galleries()
-            self.logger.info(f"PAM: Galleries found: {list(galleries.keys())}")
             if not galleries:
-                self.logger.error("PAM: No enrolled users found in gallery")
-                return {"success": True, "result": "ERROR"}
+                return {"success": True, "result": "FAILED", "error": "No enrolled users"}
 
             if target_user:
                 if target_user in galleries:
+                    # Exact match: only check this user's face
                     auth.galleries = {target_user: galleries[target_user]}
                 else:
-                    self.logger.warning(f"PAM: User '{target_user}' not enrolled. Available: {list(galleries.keys())}")
-                    return {"success": True, "result": "ERROR"}
+                    # PAM username (e.g. 'mehulgolecha') doesn't match gallery name (e.g. 'mehul').
+                    # On a personal device this is always the owner — fall through to any-gallery auth.
+                    self.logger.warning(
+                        f"PAM: '{target_user}' not in gallery {list(galleries.keys())}. "
+                        f"Falling back to any-enrolled-user authentication."
+                    )
+                    auth.galleries = galleries  # any enrolled face unlocks
             else:
                 auth.galleries = galleries
 
@@ -446,46 +649,143 @@ class SentinelService:
             preview_proc = None
             if can_preview:
                 try:
-                    SENTINEL_ROOT = "/usr/lib/project-sentinel"
-                    python_bin    = os.path.join(SENTINEL_ROOT, "venv", "bin", "python3")
-                    if not os.path.exists(python_bin):
-                        python_bin = sys.executable
+                    SENTINEL_ROOT  = "/usr/lib/project-sentinel"
                     preview_script = os.path.join(SENTINEL_ROOT, "sentinel_tui", "scripts", "frame_preview.py")
+                    # The preview uses GStreamer (gi.repository.Gst) — a SYSTEM package.
+                    # Must use system python3, NOT the venv python (3.11), because
+                    # gi.repository is NOT installed inside the venv.
+                    python_bin = "/usr/bin/python3"
+                    if not os.path.exists(python_bin):
+                        # Fallback: venv python has OpenCV fallback in frame_preview.py
+                        python_bin = os.path.join(SENTINEL_ROOT, "venv", "bin", "python3")
+                        self.logger.warning(f"PAM: /usr/bin/python3 not found, falling back to {python_bin}")
 
-                    if os.path.exists(preview_script):
+                    if not os.path.exists(preview_script):
+                        self.logger.error(f"PAM: Preview script not found at {preview_script}")
+                    elif not os.path.exists(python_bin):
+                        self.logger.error(f"PAM: Python binary not found at {python_bin}")
+                    else:
+                        # ── Build minimal but complete environment for the preview process ──
+                        # We start clean (no parent env leakage) and add only what is needed.
                         env = {
+                            'PATH':              '/usr/local/bin:/usr/bin:/bin',
                             'PYTHONPATH':        SENTINEL_ROOT,
-                            'HOME':              f"/home/{target_user}" if target_user else "/root",
-                            'PATH':              "/usr/local/bin:/usr/bin:/bin",
+                            'PYTHONDONTWRITEBYTECODE': '1',
+                            'HOME':              f"/home/{target_user}" if target_user else '/root',
+                            # OpenCV / Mesa need these silenced
+                            'LIBGL_DEBUG':       'quiet',
+                            'MESA_DEBUG':        'silent',
                         }
-                        if display:         env['DISPLAY']         = display
-                        if wayland_display: env['WAYLAND_DISPLAY'] = wayland_display
-                        if xdg_runtime:     env['XDG_RUNTIME_DIR'] = xdg_runtime
-                        if xauth:           env['XAUTHORITY']      = xauth
 
-                        cmd_args = [python_bin, preview_script, "--mode", "auth",
-                                    "--socket", DEFAULT_SOCKET_PATH]
+                        # Display/session variables
+                        if display:         env['DISPLAY']                   = display
+                        if wayland_display: env['WAYLAND_DISPLAY']           = wayland_display
+                        if xdg_runtime:     env['XDG_RUNTIME_DIR']           = xdg_runtime
+                        if xauth:           env['XAUTHORITY']                = xauth
+
+                        # DBUS is required by most Wayland compositors & GTK (incl. OpenCV GTK backend)
+                        dbus_addr = gui_context.get('dbus_session_bus_address', '')
+                        if dbus_addr:
+                            env['DBUS_SESSION_BUS_ADDRESS'] = dbus_addr
+                        elif xdg_runtime and os.path.exists(f"{xdg_runtime}/bus"):
+                            env['DBUS_SESSION_BUS_ADDRESS'] = f"unix:path={xdg_runtime}/bus"
+
+                        # SENTINEL_SOCKET_PATH so the preview knows where to connect
+                        env['SENTINEL_SOCKET_PATH'] = DEFAULT_SOCKET_PATH
+
+                        # ── CRITICAL: Build command with env vars baked in ──
+                        #
+                        # Problem: runuser -u user -- python3 script.py
+                        #   Popen(env=X) only sets the environment for the 'runuser'
+                        #   process itself. runuser then creates a FRESH PAM-based
+                        #   environment for the child process, discarding WAYLAND_DISPLAY,
+                        #   XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, etc.
+                        #
+                        # Fix: use /usr/bin/env VAR=value ... inside the runuser invocation
+                        #   so the env vars are set AS part of the spawned process:
+                        #   runuser -u user -- /usr/bin/env WAYLAND=... python3 script.py
+
+                        # Build KEY=VALUE pairs for /usr/bin/env
+                        env_pairs = [f"{k}={v}" for k, v in env.items()]
+
+                        inner_cmd = ["/usr/bin/env"] + env_pairs + [
+                            python_bin, preview_script, "--mode", "auth",
+                            "--socket", DEFAULT_SOCKET_PATH
+                        ]
+
                         if target_user:
-                            cmd_args = ["runuser", "-u", target_user, "--"] + cmd_args
+                            # runuser -u <user> -- /usr/bin/env KEY=VALUE ... python3 ...
+                            cmd_args = ["runuser", "-u", target_user, "--"] + inner_cmd
+                            popen_env = None  # don't set env= on runuser itself
+                        else:
+                            # No user switch needed: pass env directly to python3
+                            cmd_args = [python_bin, preview_script, "--mode", "auth",
+                                        "--socket", DEFAULT_SOCKET_PATH]
+                            popen_env = env
 
                         log_path = "/var/log/sentinel/preview.log"
+                        self.logger.info(f"PAM: Launching preview (user='{target_user}')")
+                        self.logger.info(f"PAM: Preview cmd: {' '.join(cmd_args[:10])} ...")
+                        self.logger.info(
+                            f"PAM: Preview env: WAYLAND={env.get('WAYLAND_DISPLAY','')}, "
+                            f"DISPLAY={env.get('DISPLAY','')}, "
+                            f"XDG={env.get('XDG_RUNTIME_DIR','')}, "
+                            f"DBUS={env.get('DBUS_SESSION_BUS_ADDRESS','')}"
+                        )
                         try:
                             log_file = open(log_path, "a")
-                            log_file.write(f"\n--- PAM preview: {time.ctime()} | user={target_user} ---\n")
-                            log_file.write(f"    cmd: {' '.join(cmd_args)}\n")
-                            log_file.write(f"    env: {env}\n")
+                            log_file.write(f"\n{'='*60}\n")
+                            log_file.write(f"PAM preview: {time.ctime()} | user={target_user}\n")
+                            log_file.write(f"  cmd: {' '.join(cmd_args)}\n")
+                            log_file.write(f"  WAYLAND_DISPLAY: {env.get('WAYLAND_DISPLAY','')}\n")
+                            log_file.write(f"  DISPLAY:         {env.get('DISPLAY','')}\n")
+                            log_file.write(f"  XDG_RUNTIME_DIR: {env.get('XDG_RUNTIME_DIR','')}\n")
+                            log_file.write(f"  DBUS:            {env.get('DBUS_SESSION_BUS_ADDRESS','')}\n")
+                            log_file.write(f"{'='*60}\n")
                             log_file.flush()
-                            preview_proc = subprocess.Popen(cmd_args, env=env,
-                                                            stdout=log_file, stderr=log_file)
+                            preview_proc = subprocess.Popen(
+                                cmd_args,
+                                env=popen_env,     # None for runuser case (runuser sets its own env)
+                                stdout=log_file,
+                                stderr=log_file,
+                                close_fds=True,
+                            )
                         except OSError as le:
-                            self.logger.warning(f"PAM: Preview log open failed: {le}")
-                            preview_proc = subprocess.Popen(cmd_args, env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        self.logger.info(f"PAM: Preview launched pid={preview_proc.pid if preview_proc else 'N/A'}")
-                    else:
-                        self.logger.warning(f"PAM: Preview script not found: {preview_script}")
+                            self.logger.warning(f"PAM: Preview log open failed ({le}), DEVNULL fallback")
+                            preview_proc = subprocess.Popen(
+                                cmd_args, env=popen_env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                close_fds=True,
+                            )
+                        self.logger.info(f"PAM: Preview launched, pid={preview_proc.pid}")
                 except Exception as pe:
-                    self.logger.warning(f"PAM: Preview launch failed: {pe}", exc_info=True)
+                    self.logger.error(f"PAM: Preview launch failed: {pe}", exc_info=True)
+
+            # ── Audio / Text Guidance Fallback Logic ──
+            # If the preview window failed to open, or exited immediately, we rely on Audio.
+            preview_running = False
+            if preview_proc:
+                time.sleep(0.3)  # Give GStreamer a fraction of a second to fail if Wayland socket is blocked
+                if preview_proc.poll() is None:
+                    preview_running = True
+                else:
+                    self.logger.warning(f"PAM: Preview window failed to open (exited with code {preview_proc.returncode})")
+
+            if not preview_running:
+                self.logger.info("PAM: No visual preview available. Enabling Audio/Text guidance fallback.")
+                if hasattr(self, 'instruction_manager') and self.instruction_manager:
+                    self.instruction_manager.update_config(preview_enabled=False, audio_enabled=True, text_enabled=True)
+                    # For sudo, they can't see the UI, so play the 'Looking for face' audio
+                    from instruction_manager import InstructionType
+                    self.instruction_manager.send_instruction(InstructionType.LOOK_AT_CAMERA)
+            else:
+                self.logger.info("PAM: Visual preview is running. Enabling Text+Audio guidance on preview window.")
+                if hasattr(self, 'instruction_manager') and self.instruction_manager:
+                    # CRITICAL: Text must be enabled on preview window so we can overlay guidance like "Turn left", "Blink once"
+                    # Send initial LOOK_AT_CAMERA prompt to preview
+                    self.instruction_manager.update_config(preview_enabled=True, audio_enabled=True, text_enabled=True)
+                    from instruction_manager import InstructionType
+                    self.instruction_manager.send_instruction(InstructionType.LOOK_AT_CAMERA)
 
             # ── Open camera and run recognition loop ──
             width   = self.config.config.getint('Camera', 'width',  fallback=640)
@@ -501,8 +801,9 @@ class SentinelService:
                 self.current_mode = 'pam_auth'
 
             start_time = time.time()
-            timeout    = 11.0
+            timeout    = 30.0  # Allow full auth including 20s challenge timeout
             status     = "FAILED"
+            frame_display_callback = params.get('_on_frame_ready', None)
 
             try:
                 while time.time() - start_time < timeout:
@@ -513,8 +814,16 @@ class SentinelService:
 
                     state, msg, _, info = auth.process_frame(frame)
                     dist = info.get('dist', 1.0) if info else 1.0
+                    dist_text = f"{dist:.3f}" if isinstance(dist, (int, float)) else "N/A"
 
-                    self.logger.debug(f"PAM frame: state={state} msg={msg} dist={dist:.3f}")
+                    self.logger.debug(f"PAM frame: state={state} msg={msg} dist={dist_text}")
+                    
+                    # OPTIMIZATION: Send frame to callback for real-time display (Priority 3)
+                    if frame_display_callback:
+                        try:
+                            frame_display_callback(frame)
+                        except Exception as e:
+                            self.logger.debug(f"PAM: Frame callback error (non-fatal): {e}")
 
                     if state in ("SUCCESS", "REQUIRE_2FA", "STATE_2FA"):
                         self.logger.info(f"PAM: Face matched for '{target_user}' (dist={dist:.3f})")
@@ -537,11 +846,28 @@ class SentinelService:
                 except: preview_proc.kill()
 
             self.logger.info(f"PAM: Result = {status}")
+            if status == "FAILED":
+                return {"success": True, "result": "FAILED", "error": "Face detection timed out (no face seen)"}
+            
+            # OPTIMIZATION: Call intrusion review callback if authentication succeeded (Priority 4)
+            if status == "SUCCESS" and params.get('_on_intrusions_available'):
+                try:
+                    import glob
+                    if not self.config: 
+                        self.config = BiometricConfig()
+                    blacklist_dir = self.config.BLACKLIST_DIR
+                    intrusion_files = sorted(glob.glob(os.path.join(blacklist_dir, "intrusion_*.jpg")))
+                    if intrusion_files:
+                        self.logger.info(f"PAM: Found {len(intrusion_files)} intrusions to review")
+                        params['_on_intrusions_available'](len(intrusion_files))
+                except Exception as e:
+                    self.logger.debug(f"PAM: Intrusion review callback failed (non-fatal): {e}")
+            
             return {"success": True, "result": status}
 
         except Exception as e:
-            self.logger.error(f"PAM Error: {e}", exc_info=True)
-            return {"success": True, "result": "ERROR"}
+            self.logger.error(f"PAM: Authentication loop failed: {e}", exc_info=True)
+            return {"success": True, "result": "FAILED", "error": f"Internal Error: {str(e)}"}
 
 
     # --- ENROLLMENT METHODS ---
@@ -625,6 +951,73 @@ class SentinelService:
             elif len(faces) > 1:
                 status = "multiple_faces"
                 
+            # ──────────────────────────────────────────────────────────────────
+            # ENHANCED ENROLLMENT FACE BOX WITH VISUAL FEEDBACK
+            # ──────────────────────────────────────────────────────────────────
+            if face_box is not None and len(face_box) >= 4:
+                try:
+                    x, y, w, h = [int(v) for v in face_box[:4]]
+                    
+                    # Enrollment color: Gold/Yellow for quality status
+                    enroll_colors = {
+                        "ready": (0, 215, 255),        # Gold (BGR)
+                        "no_face": (0, 165, 255),      # Orange (no face)
+                        "multiple_faces": (0, 0, 255), # Red (multiple)
+                        "low_brightness": (0, 255, 255),  # Yellow (lighting issue)
+                        "face_too_small": (0, 165, 255),  # Orange (distance)
+                        "face_too_large": (0, 165, 255),  # Orange (distance)
+                        "face_too_close": (0, 165, 255),  # Orange (distance)
+                        "low_sharpness": (0, 255, 255),   # Yellow (quality)
+                    }
+                    box_color = enroll_colors.get(str(status), (0, 215, 255))  # Default gold
+                    
+                    # Main bounding box
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
+                    
+                    # Corner accent lines (matching auth style)
+                    corner_len = max(15, min(w, h) // 8)
+                    corner_thickness = 2
+                    
+                    # Top-left corner
+                    cv2.line(frame, (x, y), (x + corner_len, y), box_color, corner_thickness)
+                    cv2.line(frame, (x, y), (x, y + corner_len), box_color, corner_thickness)
+                    
+                    # Top-right corner
+                    cv2.line(frame, (x + w, y), (x + w - corner_len, y), box_color, corner_thickness)
+                    cv2.line(frame, (x + w, y), (x + w, y + corner_len), box_color, corner_thickness)
+                    
+                    # Bottom-left corner
+                    cv2.line(frame, (x, y + h), (x + corner_len, y + h), box_color, corner_thickness)
+                    cv2.line(frame, (x, y + h), (x, y + h - corner_len), box_color, corner_thickness)
+                    
+                    # Bottom-right corner
+                    cv2.line(frame, (x + w, y + h), (x + w - corner_len, y + h), box_color, corner_thickness)
+                    cv2.line(frame, (x + w, y + h), (x + w, y + h - corner_len), box_color, corner_thickness)
+                    
+                    # Status label above box
+                    status_text = "READY" if str(status) == "ready" else str(status).upper()
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.5
+                    font_thickness = 1
+                    text_size = cv2.getTextSize(status_text, font, font_scale, font_thickness)
+                    text_width = text_size[0][0]
+                    text_height = text_size[0][1]
+                    
+                    # Background for status label
+                    overlay = frame.copy()
+                    bg_x1 = x
+                    bg_y1 = max(0, y - text_height - 8)
+                    bg_x2 = x + text_width + 4
+                    bg_y2 = y
+                    cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+                    frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+                    
+                    cv2.putText(frame, status_text, (x + 2, y - 4),
+                              font, font_scale, box_color, font_thickness)
+                              
+                except Exception as e:
+                    self.logger.debug(f"Failed to draw enrollment face box: {e}")
+
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_b64 = base64.b64encode(buffer).decode('utf-8')
             
@@ -717,42 +1110,102 @@ class SentinelService:
                 return {"success": False, "error": "No config updates provided"}
             
             import configparser
-            ini_path = self.config.config_path if hasattr(self.config, 'config_path') else 'config.ini'
+            # Use the actual config path that was loaded, or default to system location
+            ini_path = None
+            if hasattr(self.config, 'config_path') and self.config.config_path:
+                ini_path = self.config.config_path
+            else:
+                # Fallback: prefer system config, then local
+                if os.path.exists('/etc/project-sentinel/config.ini'):
+                    ini_path = '/etc/project-sentinel/config.ini'
+                else:
+                    ini_path = os.path.join(os.getcwd(), 'config.ini')
+            
             cfg_edit = configparser.ConfigParser()
             
             if os.path.exists(ini_path):
                 cfg_edit.read(ini_path)
             
+            # ME-4: Capture old values for audit trail
+            changes = []
+            
             # Meta Section
             if 'Meta' not in cfg_edit: cfg_edit['Meta'] = {}
-            if 'config_version' in updates: cfg_edit['Meta']['config_version'] = str(updates['config_version'])
+            if 'config_version' in updates:
+                old_value = cfg_edit.get('Meta', 'config_version', fallback='undefined')
+                new_value = str(updates['config_version'])
+                if old_value != new_value:
+                    changes.append(f"Meta.config_version: {old_value} → {new_value}")
+                cfg_edit['Meta']['config_version'] = new_value
             else: cfg_edit['Meta']['config_version'] = "1"
             
             # Camera Section
             if 'Camera' not in cfg_edit: cfg_edit['Camera'] = {}
-            if 'camera_width' in updates: cfg_edit['Camera']['width'] = str(updates['camera_width'])
-            if 'camera_height' in updates: cfg_edit['Camera']['height'] = str(updates['camera_height'])
-            if 'camera_fps' in updates: cfg_edit['Camera']['fps'] = str(updates['camera_fps'])
+            if 'camera_width' in updates:
+                old_value = cfg_edit.get('Camera', 'width', fallback='undefined')
+                new_value = str(updates['camera_width'])
+                if old_value != new_value:
+                    changes.append(f"Camera.width: {old_value} → {new_value}")
+                cfg_edit['Camera']['width'] = new_value
+            
+            if 'camera_height' in updates:
+                old_value = cfg_edit.get('Camera', 'height', fallback='undefined')
+                new_value = str(updates['camera_height'])
+                if old_value != new_value:
+                    changes.append(f"Camera.height: {old_value} → {new_value}")
+                cfg_edit['Camera']['height'] = new_value
+            
+            if 'camera_fps' in updates:
+                old_value = cfg_edit.get('Camera', 'fps', fallback='undefined')
+                new_value = str(updates['camera_fps'])
+                if old_value != new_value:
+                    changes.append(f"Camera.fps: {old_value} → {new_value}")
+                cfg_edit['Camera']['fps'] = new_value
+            
             # Since user manually edited, turn OFF auto_detect to lock in their choice
             cfg_edit['Camera']['auto_detect'] = 'false'
             
             # Liveness / FaceDetection Section
             if 'Liveness' not in cfg_edit: cfg_edit['Liveness'] = {}
-            if 'challenge_timeout' in updates: cfg_edit['Liveness']['challenge_timeout'] = str(updates['challenge_timeout'])
-            if 'spoof_threshold' in updates: cfg_edit['Liveness']['spoof_threshold'] = str(updates['spoof_threshold'])
+            if 'challenge_timeout' in updates:
+                old_value = cfg_edit.get('Liveness', 'challenge_timeout', fallback='undefined')
+                new_value = str(updates['challenge_timeout'])
+                if old_value != new_value:
+                    changes.append(f"Liveness.challenge_timeout: {old_value} → {new_value}")
+                cfg_edit['Liveness']['challenge_timeout'] = new_value
+            
+            if 'spoof_threshold' in updates:
+                old_value = cfg_edit.get('Liveness', 'spoof_threshold', fallback='undefined')
+                new_value = str(updates['spoof_threshold'])
+                if old_value != new_value:
+                    changes.append(f"Liveness.spoof_threshold: {old_value} → {new_value}")
+                cfg_edit['Liveness']['spoof_threshold'] = new_value
             
             if 'FaceDetection' not in cfg_edit: cfg_edit['FaceDetection'] = {}
-            if 'min_face_size' in updates: cfg_edit['FaceDetection']['min_face_size'] = str(updates['min_face_size'])
+            if 'min_face_size' in updates:
+                old_value = cfg_edit.get('FaceDetection', 'min_face_size', fallback='undefined')
+                new_value = str(updates['min_face_size'])
+                if old_value != new_value:
+                    changes.append(f"FaceDetection.min_face_size: {old_value} → {new_value}")
+                cfg_edit['FaceDetection']['min_face_size'] = new_value
             
-            # Save to disk
+            # Save to disk with proper permissions
+            os.makedirs(os.path.dirname(ini_path), exist_ok=True)
             with open(ini_path, 'w') as configfile:
                 cfg_edit.write(configfile)
                 
             os.chmod(ini_path, 0o600)
-                
-            # Reload in memory
-            self.config = BiometricConfig()
-            self.logger.info("Configuration updated successfully.")
+            
+            # Reload in memory with the explicit path to ensure we read what we just wrote
+            self.config = BiometricConfig(ini_path)
+            
+            # ME-4: Log all config changes to audit trail
+            if changes:
+                change_str = " | ".join(changes)
+                self.logger.info(f"CONFIG_CHANGED: {change_str} | Path={ini_path} | UID={os.getuid()}")
+            else:
+                self.logger.debug(f"CONFIG_UPDATE_ATTEMPTED: No actual changes (update normalized config)")
+            
             return {"success": True}
         except Exception as e:
             self.logger.error(f"Error updating config: {e}")
@@ -942,7 +1395,76 @@ def _rpc_error(request_id, code, message):
 def _rpc_result(request_id, result):
     return {"jsonrpc": "2.0", "result": result, "id": request_id}
 
-def _handle_rpc_line(service: SentinelService, methods: dict, line: str):
+# ===== SECURITY: RPC Authorization (CR-3: Per-Method Privilege Checks) =====
+def _check_rpc_permission(method_name, caller_uid):
+    """
+    CR-3: Checks if caller has permission for RPC method.
+    Returns (allowed: bool, reason: str)
+    
+    This prevents unprivileged users from calling sensitive operations
+    like enrollment, config changes, or intrusion record deletion.
+    """
+    # Public methods - anyone can call (safe operations)
+    PUBLIC_METHODS = {
+        'status',              # Query daemon status
+        'authenticate_pam',    # Attempt biometric auth
+        'process_auth_frame',  # Feed camera frame for auth
+    }
+    
+    # Admin-only methods (require root)
+    ADMIN_METHODS = {
+        'initialize',          # Load models (security-critical)
+        'start_enrollment',    # Begin enrollment (security-critical)
+        'process_enroll_frame',# Capture enrollment frame (sensitive)
+        'capture_enroll_pose', # Save enrollment pose (sensitive)
+        'delete_intrusion',    # Remove intrusion record (sensitive)
+        'confirm_intrusion',   # Add to blacklist (security-critical)
+        'update_config',       # Modify settings (security-critical)
+        'reset_system',        # Reset daemon (security-critical)
+    }
+    
+    # Read-only methods (anyone can call, low security impact)
+    READONLY_METHODS = {
+        'get_config',         # Read settings
+        'get_enrolled_users', # List users
+        'get_intrusions',     # View intrusions
+    }
+    
+    # CR-3: Check method against permission tiers
+    if method_name in PUBLIC_METHODS:
+        return (True, "Public method — no privilege required")
+    
+    if method_name in READONLY_METHODS:
+        return (True, "Read-only method — no privilege required")
+    
+    if method_name in ADMIN_METHODS:
+        if caller_uid == 0:
+            return (True, "Running as root")
+        else:
+            return (False, f"Method '{method_name}' requires root privileges (uid={caller_uid})")
+    
+    # Unknown method (shouldn't happen if RPC dispatch catches it first)
+    return (False, f"Unknown method: {method_name}")
+
+def _get_socket_peer_uid(conn):
+    """
+    Attempts to get the UID of the peer process connected to this socket.
+    Returns UID or None if unable to determine.
+    
+    Note: SO_PEERCRED is Linux-specific. On other OSes, this returns None.
+    """
+    try:
+        import struct
+        # SO_PEERCRED returns (pid, uid, gid) on Linux
+        peercred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+        _, uid, _ = struct.unpack('3i', peercred)
+        return uid
+    except (OSError, ImportError, AttributeError):
+        # Not Linux or SO_PEERCRED not available
+        logger.debug("Unable to determine peer UID (may not be Linux or Unix socket)")
+        return None
+
+def _handle_rpc_line(service: SentinelService, methods: dict, line: str, conn: socket.socket=None, write_lock=None):
     try:
         request = json.loads(line)
         method = request.get("method")
@@ -954,11 +1476,29 @@ def _handle_rpc_line(service: SentinelService, methods: dict, line: str):
         if method not in methods:
             return _rpc_error(request_id, -32601, f"Method '{method}' not found")
 
+        # CR-3: Check authorization before executing method
+        caller_uid = _get_socket_peer_uid(conn) if conn else 0
+        allowed, reason = _check_rpc_permission(method, caller_uid)
+        
+        if not allowed:
+            logger.warning(f"RPC authorization denied: method='{method}' uid={caller_uid} reason='{reason}'")
+            return _rpc_error(request_id, -32003, f"Permission denied: {reason}")
+
         func = methods[method]
         
-        # Don't lock entire status check, but lock logic methods
-        # to ensure thread safety on Camera/Processor
-        if method == "status":
+        # authenticate_pam runs its OWN internal locking and holds the camera
+        # loop for up to 30 seconds. It MUST NOT hold service.lock here, or
+        # process_auth_frame (called by the preview subprocess) will deadlock.
+        # status and authenticate_pam are both safe to call without the outer lock.
+        if method in ("status", "authenticate_pam"):
+             if method == "authenticate_pam" and conn and write_lock:
+                 def pam_on_update(text):
+                     payload = {"method": "pam_info", "params": {"text": text}}
+                     try:
+                         with write_lock:
+                             conn.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode('utf-8'))
+                     except: pass
+                 params["_on_update"] = pam_on_update
              result = func(params)
         else:
              with service.lock:
@@ -974,7 +1514,7 @@ def _handle_rpc_line(service: SentinelService, methods: dict, line: str):
 
 def _dispatch_request(conn: socket.socket, service: SentinelService, methods: dict, line: str, write_lock: threading.Lock):
     try:
-        resp = _handle_rpc_line(service, methods, line)
+        resp = _handle_rpc_line(service, methods, line, conn, write_lock)
         if resp:
             try:
                 out = (json.dumps(resp, ensure_ascii=False) + "\n").encode('utf-8')
@@ -1030,7 +1570,12 @@ def _handle_client(conn: socket.socket, service: SentinelService, methods: dict)
 
 def _create_server_socket(socket_path):
     sock_dir = os.path.dirname(socket_path)
-    os.makedirs(sock_dir, exist_ok=True)
+    os.makedirs(sock_dir, exist_ok=True, mode=0o755)
+    # Ensure directory has correct permissions for socket
+    try:
+        os.chmod(sock_dir, 0o755)
+    except Exception as e:
+        logger.warning(f"Could not chmod socket directory: {e}")
     
     try: os.unlink(socket_path)
     except FileNotFoundError: pass
@@ -1066,10 +1611,15 @@ def main():
         try:
             logger.info("Warmup thread starting...")
             # We use a long timeout for internal init
-            service.initialize({"timeout_sec": 300})
-            logger.info("Warmup finished.")
+            result = service.initialize({"timeout_sec": 300})
+            if result.get('success'):
+                logger.info("Warmup finished successfully. Models loaded and ready.")
+            else:
+                logger.error(f"Warmup FAILED: {result.get('error', 'unknown error')}")
+                logger.error("PAM authentication will NOT work until this is resolved.")
+                logger.error("Run: sudo /usr/lib/project-sentinel/venv/bin/pip install opencv-python numpy onnxruntime scipy mediapipe")
         except Exception as e:
-            logger.warning(f"Warmup failed (non-fatal): {e}")
+            logger.error(f"Warmup exception (FATAL — daemon cannot authenticate): {e}", exc_info=True)
 
             
     Thread(target=_warmup, daemon=True).start()

@@ -32,9 +32,9 @@ class AuthenticationScreen(Container):
         align: center middle;
     }
     #auth-container {
-        width: 60;
+        width: 80;
         height: auto;
-        min-height: 25;
+        min-height: 30;
         background: #111827;
         border: heavy #1e3a5f;
         padding: 2 4;
@@ -119,6 +119,14 @@ class AuthenticationScreen(Container):
 
                 with Horizontal(id="score-bar"):
                     yield Label("", id="score-fill")
+
+                with Horizontal(classes="info-row"):
+                    yield Label("Recognition Threshold:", classes="info-label")
+                    yield Label("—", id="lbl-threshold", classes="info-value")
+
+                with Horizontal(classes="info-row"):
+                    yield Label("Task Progress:", classes="info-label")
+                    yield Label("—", id="lbl-task", classes="info-value")
 
                 yield Label("Waiting for camera...", id="live-status-box")
                 
@@ -212,6 +220,8 @@ class AuthenticationScreen(Container):
         
         self.query_one("#lbl-score", Label).update("0.00")
         self.query_one("#lbl-zone", Label).update("")
+        self.query_one("#lbl-threshold", Label).update("—")
+        self.query_one("#lbl-task", Label).update("—")
         self.query_one("#score-fill", Label).styles.width = "0%"
 
         self._auth_active = True
@@ -264,6 +274,21 @@ class AuthenticationScreen(Container):
             self.query_one("#lbl-score", Label).update(f"{dist:.3f}")
             self.query_one("#score-fill", Label).styles.width = f"{visual_score}%"
             
+            # Update threshold display based on distance
+            threshold_lbl = self.query_one("#lbl-threshold", Label)
+            if dist < 0.25:
+                threshold_lbl.update("Golden (< 0.25)")
+                threshold_lbl.styles.color = "#ffd700"  # Gold
+            elif dist < 0.42:
+                threshold_lbl.update("Standard (< 0.42)")
+                threshold_lbl.styles.color = "#00ff88"  # Green
+            elif dist < 0.50:
+                threshold_lbl.update("Two-Factor (< 0.50)")
+                threshold_lbl.styles.color = "#ffaa00"  # Orange
+            else:
+                threshold_lbl.update("Above Threshold")
+                threshold_lbl.styles.color = "#ff3366"  # Red
+            
             zn = self.query_one("#lbl-zone", Label)
             zn.remove_class("zone-badge--golden", "zone-badge--standard", "zone-badge--2fa", "zone-badge--failure")
             
@@ -281,6 +306,8 @@ class AuthenticationScreen(Container):
                 zn.add_class("zone-badge--failure")
 
             box = self.query_one("#live-status-box", Label)
+            box.remove_class("--warning")
+            task_lbl = self.query_one("#lbl-task", Label)
             
             if state in ("SUCCESS", "FAILURE", "LOCKOUT"):
                 self._handle_completion(state, res)
@@ -289,13 +316,39 @@ class AuthenticationScreen(Container):
                 err_msg = res.get("message", "Camera error — check daemon logs")
                 self._stop_test(error=err_msg)
             elif state == "RECOGNIZED":
-                box.update("Face Recognized! Checking Liveness...")
-            elif state == "LIVENESS_CHALLENGE":
-                chal = res.get("liveness_challenge", "")
-                box.update(f"Liveness Check:\n\nPlease nod your head {chal}")
+                # Show the instruction/challenge message prominently
+                message = res.get("message", "").strip()
+                box.update(message if message else "Face Recognized! Complete challenges...")
+                # Extract challenge type for task display using actual backend message text
+                msg_lower = message.lower()
+                if "please turn" in msg_lower and "right" in msg_lower:
+                    task_lbl.update("↗️  Turn Head Right")
+                elif "please turn" in msg_lower and "left" in msg_lower:
+                    task_lbl.update("↖️  Turn Head Left")
+                elif "please turn" in msg_lower and "up" in msg_lower:
+                    task_lbl.update("⬆️  Turn Head Up")
+                elif "please turn" in msg_lower and "down" in msg_lower:
+                    task_lbl.update("⬇️  Turn Head Down")
+                elif "blink" in msg_lower:
+                    task_lbl.update("👁️  Blink Once")
+                elif "face detected" in msg_lower:
+                    task_lbl.update("👁️  Face Detected")
+                else:
+                    task_lbl.update("👁️  Perform challenge")
                 box.add_class("--warning")
+            elif state == "REQUIRE_2FA" or state == "STATE_2FA":
+                message = res.get("message", "").strip()
+                box.update(message if message else "2FA Required: Please enter your password")
+                task_lbl.update("🔐 Password Required")
+                box.add_class("--warning")
+            elif state == "WAITING":
+                message = res.get("message", "").strip()
+                box.update(message if message else "Looking for face...")
+                task_lbl.update("👁️  Position Face")
             else:
-                box.update("Waiting for face...")
+                message = res.get("message", "").strip()
+                box.update(message if message else "Waiting for face...")
+                task_lbl.update("—")
 
         self.app.call_from_thread(_update)
 

@@ -41,6 +41,7 @@ NAV_ITEMS = [
     ("󰟍", "Enrollment",     "enrollment"),
     ("󰯃", "Authentication", "authentication"),
     ("󰄬", "Devices",        "devices"),
+    ("󰙬", "Reviews",        "reviews"),
     ("󰒓", "Settings",       "settings"),
     ("󰙬", "Diagnostics",    "diagnostics"),
 ]
@@ -68,6 +69,7 @@ class SentinelApp(App):
         Binding("e", "show_screen('enrollment')",     "Enrollment",     show=True),
         Binding("a", "show_screen('authentication')", "Auth",           show=True),
         Binding("v", "show_screen('devices')",        "Devices",        show=True),
+        Binding("r", "show_screen('reviews')",        "Reviews",        show=True),
         Binding("s", "show_screen('settings')",       "Settings",       show=True),
         Binding("x", "show_screen('diagnostics')",    "Diagnostics",    show=True),
         Binding("q", "quit",                          "Quit",           show=True),
@@ -263,6 +265,9 @@ class SentinelApp(App):
             elif screen_id == "devices":
                 from sentinel_tui.screens.devices import DevicesScreen
                 return DevicesScreen(self._ipc)
+            elif screen_id == "reviews":
+                from sentinel_tui.screens.reviews import ReviewsScreen
+                return ReviewsScreen(self._ipc)
             elif screen_id == "settings":
                 from sentinel_tui.screens.settings import SettingsScreen
                 return SettingsScreen(self._ipc)
